@@ -91,7 +91,7 @@
     }
   },
   "scripts": {
-    "compile": "tsc -p ./",
+    "compile": "tsc -p ./ && node scripts/check-webview.js",
     "watch": "tsc -watch -p ./",
     "package": "vsce package"
   },

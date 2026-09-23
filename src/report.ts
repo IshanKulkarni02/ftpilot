@@ -90,6 +90,7 @@ export function writeReport(workspaceRoot: string, s: DeployState): string {
         <td class="num">${t.unchanged}</td>
         <td>${formatMs(t.uploadMs)}</td>
         <td>${t.restarted ? "yes" : "-"}</td>
+        <td>${t.health ? (t.health.ok ? `<span class="st-done">HTTP ${t.health.status}, ${t.health.ms} ms</span>` : `<span class="st-failed">${esc(t.health.error)}</span>`) + `<div class="muted">${esc(t.health.url)}</div>` : "-"}</td>
       </tr>`).join("");
 
   const details = s.targets.map((t) => {
@@ -125,7 +126,7 @@ export function writeReport(workspaceRoot: string, s: DeployState): string {
   .hint { margin-top: 32px; } @media print { .hint { display: none; } body { margin: 0; max-width: none; } section.target { break-inside: avoid-page; } }
 </style></head>
 <body>
-  <h1>FTPilot ${preview ? "deploy preview" : "deploy report"} <span class="badge ${ok ? "ok" : "bad"}">${preview && ok ? "Preview" : ok ? "Succeeded" : s.cancelled ? "Cancelled" : "Failed"}</span></h1>
+  <h1>FTPilot ${preview ? "deploy preview" : "deploy report"} <span class="badge ${ok && !s.healthFailed ? "ok" : "bad"}">${preview && ok ? "Preview" : ok && s.healthFailed ? "Deployed, health check failed" : ok ? "Succeeded" : s.cancelled ? "Cancelled" : "Failed"}</span></h1>
   <div class="muted">${esc(s.project)} · ${esc(started.toLocaleString())}</div>
   ${preview ? `<div class="stats">
     <div>${s.targets.reduce((n, t) => n + t.toUpload, 0)}<span>to upload</span></div>
@@ -157,7 +158,7 @@ export function writeReport(workspaceRoot: string, s: DeployState): string {
     <tbody>${previewRows}</tbody>
   </table>
   ${s.compareRemote ? `<p class="muted">"Differs on server": FTPilot's record says it's current, but the server copy is missing or a different size (e.g. edited via FileZilla). A normal deploy won't resend these; use Full Re-upload to fix them. "Extra on server" files are never touched.</p>` : `<p class="muted">Compared against FTPilot's record of the last deploy, not the live server.</p>`}` : `<table>
-    <thead><tr><th>Target</th><th>Status</th><th>Build</th><th class="num">Uploaded</th><th class="num">Removed</th><th class="num">Unchanged</th><th>Upload time</th><th>Restarted</th></tr></thead>
+    <thead><tr><th>Target</th><th>Status</th><th>Build</th><th class="num">Uploaded</th><th class="num">Removed</th><th class="num">Unchanged</th><th>Upload time</th><th>Restarted</th><th>Health</th></tr></thead>
     <tbody>${rows}</tbody>
   </table>`}
   ${s.events?.length ? `<h2>Connection events</h2><ul class="events">${s.events.map((e) => `<li><span class="muted">${esc(new Date(e.t).toLocaleTimeString())}</span> ${esc(e.message)}</li>`).join("")}</ul>` : ""}

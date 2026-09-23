@@ -1,3 +1,5 @@
+import type { HealthResult } from "./health";
+
 export type TargetStatus = "pending" | "building" | "built" | "uploading" | "done" | "failed";
 
 export interface TargetProgress {
@@ -15,6 +17,7 @@ export interface TargetProgress {
   removed: number;
   unchanged: number;
   restarted?: boolean;
+  health?: HealthResult;
   /** Preview breakdown: files new vs. changed since the last deploy. */
   newCount?: number;
   changedCount?: number;
@@ -39,7 +42,9 @@ export interface DeployState {
   onlyTargetId?: string;
   /** Preview: expected upload time from this server's last measured speed. */
   estimateMs?: number;
-  phase: "preparing" | "building" | "comparing" | "uploading" | "done" | "failed";
+  phase: "preparing" | "building" | "comparing" | "uploading" | "checking" | "done" | "failed";
+  /** Upload succeeded but at least one health check didn't. */
+  healthFailed?: boolean;
   startedAt: number;
   finishedAt?: number;
   project: string;

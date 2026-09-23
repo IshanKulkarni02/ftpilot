@@ -34,6 +34,7 @@ Open it with the gear icon. Changes are kept as a draft until you **Save Configu
 | **Build Output Directory** | Folder whose contents get uploaded, e.g. `apps/web/out`. |
 | **Server Destination Directory** | Path on the FTP server, from the FTP account root, e.g. `/public_html`. |
 | **cPanel / Passenger App Restart** | File touched after upload to restart a Node.js app, e.g. `/myapp/tmp/restart.txt`. |
+| **Health Check URL** | Fetched after every deploy (3 tries, 5 s apart). Passes on HTTP 200–399. **Test** fetches it now. Optional "must contain" text is under Advanced options. |
 | **Dedicated FTP Account** | For a subdomain with its own FTP login. |
 | **Build Environment Variables** | Injected into the build. Secret values live in VS Code SecretStorage. |
 

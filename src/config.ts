@@ -29,6 +29,10 @@ export interface DeployTarget {
   restartFile?: string;
   /** Override FTP username for this target only (e.g. a subdomain with its own scoped FTP account). Password is looked up under the same override username. */
   ftpUser?: string;
+  /** Optional URL fetched after deploy (e.g. https://example.com/ or https://api.example.com/health); must answer 200–399. */
+  healthUrl?: string;
+  /** Optional text the health check response must contain. */
+  healthExpect?: string;
   /** Env vars injected into buildCommand's process env (on top of the inherited shell env). Lets the same source build differently for prod than `npm run dev` does locally. */
   env?: EnvVar[];
 }
@@ -116,6 +120,7 @@ export function validateTargets(targets: DeployTarget[]): string[] {
     if (!local) problems.push(`${label}: Build Output Directory is empty (or the project root). Pick the build folder, e.g. dist or out.`);
     else if (local.split("/").includes("..")) problems.push(`${label}: Build Output Directory must be inside the project.`);
     if (!t.remoteDir?.trim()) problems.push(`${label}: Server Destination Directory is empty.`);
+    if (t.healthUrl?.trim() && !/^https?:\/\/[^\s/]+/i.test(t.healthUrl.trim())) problems.push(`${label}: Health Check URL must start with http:// or https://.`);
   });
   return problems;
 }

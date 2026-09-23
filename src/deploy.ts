@@ -8,6 +8,7 @@ import { runBuild, validateEnvSecrets, BuildError, LogSink } from "./build";
 import { loadManifest, saveManifest, hashTarget, diffTarget, walkDir, globMatcher, Manifest } from "./manifest";
 import { DeployState, DeployTracker, TargetProgress } from "./progress";
 import { AdaptivePool, CancelledError, Job } from "./parallel";
+import { checkHealth } from "./health";
 import { writeReport, writeLog, formatMs } from "./report";
 import { snapshotTopLevelDirs, diffTopLevelDirs } from "./detect";
 import * as ftpClient from "./ftpClient";
@@ -422,6 +423,25 @@ async function runDeployInner(
           tracker.update(() => { tp.uploadMs = Date.now() - t0; tp.status = "done"; });
         }
 
+        // 5. Health checks: after every target is up (the frontend may call the API), fetch each
+        // target's URL. A just-restarted Passenger app can take a few seconds, hence retries.
+        const checks = plans.filter((p) => p.target.healthUrl?.trim());
+        if (checks.length) {
+          tracker.update((st) => { st.phase = "checking"; st.currentFile = undefined; });
+          if (plans.some((p) => p.tp.restarted)) await new Promise((r) => setTimeout(r, 3000));
+          for (const { target, tp } of checks) {
+            tracker.update((st) => { st.currentTarget = target.name; });
+            const url = target.healthUrl!.trim();
+            log.appendLine(`\nHealth check: ${target.name} -> ${url}${target.healthExpect ? ` (must contain "${target.healthExpect}")` : ""}`);
+            const result = await checkHealth(url, target.healthExpect || undefined, {
+              isCancelled: () => cancelRequested,
+              onAttempt: (i, n) => say(`Health check ${target.name} (${i}/${n})…`),
+            });
+            log.appendLine(result.ok ? `  OK: HTTP ${result.status} in ${result.ms} ms` : `  FAILED after ${result.attempts} attempt(s): ${result.error}`);
+            tracker.update((st) => { tp.health = result; if (!result.ok) st.healthFailed = true; });
+          }
+        }
+
         // Remember what worked so the next deploy starts at full speed, and how fast it
         // went so a Preview can estimate the time.
         const uploadMs = s.targets.reduce((n, t) => n + (t.uploadMs ?? 0), 0);
@@ -444,10 +464,13 @@ async function runDeployInner(
         tracker.update((st) => { st.phase = "done"; st.finishedAt = Date.now(); st.currentTarget = undefined; st.currentFile = undefined; });
         const up = s.targets.reduce((n, t) => n + t.uploaded, 0);
         const rm = s.targets.reduce((n, t) => n + t.removed, 0);
-        const message = `Done in ${formatMs(s.finishedAt! - s.startedAt)} (${up} uploaded, ${rm} removed).`;
+        const failedChecks = s.targets.filter((t) => t.health && !t.health.ok);
+        const message = `Done in ${formatMs(s.finishedAt! - s.startedAt)} (${up} uploaded, ${rm} removed)` +
+          (failedChecks.length ? `, but health check failed: ${failedChecks.map((t) => `${t.name} (${t.health!.error})`).join("; ")}.` : ".");
         log.appendLine(`\n${message}`);
         finish(workspaceRoot, tracker, logLines);
-        void vscode.window.showInformationMessage(`FTPilot: ${message}`, "Open Report").then((c) => {
+        const notify = failedChecks.length ? vscode.window.showWarningMessage : vscode.window.showInformationMessage;
+        void notify(`FTPilot: ${message}`, "Open Report").then((c) => {
           if (c) void vscode.env.openExternal(vscode.Uri.file(s.reportPath!));
         });
         return { ok: true, message };

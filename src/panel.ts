@@ -6,6 +6,7 @@ import * as ftp from "basic-ftp";
 import { setCredentials, setEnvSecret, getCredentials, getEnvSecret, getLoginStatus } from "./secrets";
 import { getCurrentBranch } from "./git";
 import { DeployState, slimState } from "./progress";
+import { checkHealth, HealthResult } from "./health";
 import * as ftpClient from "./ftpClient";
 import { detectProject } from "./detect";
 
@@ -29,6 +30,7 @@ type InMsg =
   | { type: "cancelDeploy" }
   | { type: "preview"; targetId?: string; compareRemote?: boolean; skipBuild?: boolean }
   | { type: "deployFromPreview" }
+  | { type: "testHealth"; index: number; url: string; expect?: string }
   | { type: "testFtps"; config: DeployConfig }
   | {
       type: "saveConfig";
@@ -59,6 +61,7 @@ type OutMsg =
   | { type: "error"; message: string }
   | { type: "connection"; conn: ConnState }
   | { type: "progress"; state: DeployState | null }
+  | { type: "healthResult"; index: number; result: HealthResult | null }
   | { type: "ftpsResult"; ok: boolean; message: string; certIssue?: boolean; unsupported?: boolean; suggestedHost?: string; testing?: boolean };
 
 /** Read-only facts for display; secrets are reduced to "is it set?" before leaving the host. */
@@ -377,6 +380,14 @@ export class FtpilotPanel implements vscode.WebviewViewProvider {
         await vscode.commands.executeCommand("ftpilot.preview", { targetId: msg.targetId, compareRemote: msg.compareRemote, skipBuild: msg.skipBuild });
         this.postInit();
         return;
+
+      case "testHealth": {
+        reply({ type: "healthResult", index: msg.index, result: null });
+        // One attempt: this is an interactive check, not a post-restart wait.
+        const result = await checkHealth(msg.url.trim(), msg.expect?.trim() || undefined, { attempts: 1 });
+        reply({ type: "healthResult", index: msg.index, result });
+        return;
+      }
 
       case "deployFromPreview":
         await vscode.commands.executeCommand("ftpilot.deployPreview", { targetId: this.progress?.onlyTargetId });
@@ -819,6 +830,7 @@ let draftTimer = null;
 let initDone = false;
 let progress = null; // live/last deploy state from the host
 let progressTimer = null;
+let healthNotes = {}; // target index -> null (testing) | HealthResult
 let ftpsResult = null; // last Test FTPS outcome (config tab)
 let detectNotes = {}; // target index -> { text, ok } from the last Auto-detect
 let pendingFocus = null;
@@ -902,6 +914,7 @@ window.addEventListener("message", (e) => {
     // Index-keyed toggles would leak onto other targets after a reload; reset them.
     advancedOpen = {};
     detectNotes = {};
+    healthNotes = {};
     if (ftpsResult && ftpsResult.testing) ftpsResult = null;
     render();
     initDone = true;
@@ -930,6 +943,9 @@ window.addEventListener("message", (e) => {
     for (const box of document.querySelectorAll("[data-conn]")) box.replaceWith(box.dataset.conn === "ops" ? opsConnectionBody() : connectionBox());
     const acts = document.getElementById("conn-acts");
     if (acts) acts.replaceWith(opsConnActions());
+  } else if (msg.type === "healthResult") {
+    healthNotes[msg.index] = msg.result;
+    render();
   } else if (msg.type === "ftpsResult") {
     ftpsResult = msg;
     render();
@@ -1094,6 +1110,8 @@ function stripConfig(c) {
     if (t.cwd) clean.cwd = t.cwd;
     if (t.restartFile) clean.restartFile = t.restartFile;
     if (t.ftpUser) clean.ftpUser = t.ftpUser;
+    if ((t.healthUrl || "").trim()) clean.healthUrl = t.healthUrl.trim();
+    if ((t.healthExpect || "").trim()) clean.healthExpect = t.healthExpect.trim();
     const env = (t.env || []).filter((v) => v.key).map((v) => v.secret ? { key: v.key, secret: true } : { key: v.key, value: v.value || "" });
     if (env.length) clean.env = env;
     return clean;
@@ -1151,7 +1169,7 @@ function fmtMs(ms) {
   return s < 60 ? s + "s" : Math.floor(s / 60) + "m " + (s % 60) + "s";
 }
 
-const PHASE_TITLE = { preparing: "Preparing", building: "Building", comparing: "Comparing files", uploading: "Uploading" };
+const PHASE_TITLE = { preparing: "Preparing", building: "Building", comparing: "Comparing files", uploading: "Uploading", checking: "Health check" };
 const TARGET_ICON = { pending: "circle-outline", building: "loading codicon-modifier-spin", built: "check", uploading: "loading codicon-modifier-spin", done: "pass-filled", failed: "error" };
 
 function targetProgressText(t) {
@@ -1160,7 +1178,9 @@ function targetProgressText(t) {
   if (t.status === "built") return "built in " + fmtMs(t.buildMs || 0);
   if (t.status === "uploading") return t.uploaded + " / " + t.toUpload + (t.toRemove ? " (+" + t.removed + "/" + t.toRemove + " removed)" : "");
   if (t.status === "failed") return "failed";
-  return t.uploaded + " up, " + t.removed + " removed, " + t.unchanged + " same";
+  const base = t.uploaded + " up, " + t.removed + " removed, " + t.unchanged + " same";
+  if (!t.health) return base;
+  return base + (t.health.ok ? " · healthy " + t.health.status + " (" + t.health.ms + " ms)" : " · unhealthy");
 }
 
 function progressCard() {
@@ -1168,10 +1188,11 @@ function progressCard() {
   if (!p || MODE !== "ops") return null;
   const running = isRunning(p);
   const ok = p.phase === "done";
+  if (running && p.phase === "checking" && !p.currentTarget) p.currentTarget = "";
   if (!running && ok && p.dryRun) return previewCard(p);
-  const title = running ? (p.dryRun && p.phase !== "building" ? "Previewing" : PHASE_TITLE[p.phase] || "Working") : ok ? "Deploy succeeded" : p.cancelled ? (p.dryRun ? "Preview cancelled" : "Deploy cancelled") : p.dryRun ? "Preview failed" : "Deploy failed";
+  const title = running ? (p.dryRun && p.phase !== "building" ? "Previewing" : PHASE_TITLE[p.phase] || "Working") : ok && p.healthFailed ? "Deployed, health check failed" : ok ? "Deploy succeeded" : p.cancelled ? (p.dryRun ? "Preview cancelled" : "Deploy cancelled") : p.dryRun ? "Preview failed" : "Deploy failed";
   const head = el("div", { class: "pc-head" }, [
-    ic(running ? "loading codicon-modifier-spin" : ok ? "pass-filled" : "error"),
+    ic(running ? "loading codicon-modifier-spin" : ok && !p.healthFailed ? "pass-filled" : ok ? "warning" : "error"),
     el("strong", {}, [title]),
     el("span", { class: "muted pc-time" }, [fmtMs((p.finishedAt || Date.now()) - p.startedAt)]),
     running ? null : iconBtn("close", "Dismiss", () => post({ type: "dismissProgress" })),
@@ -1210,6 +1231,9 @@ function progressCard() {
   const rows = el("ul", { class: "pc-targets" }, p.targets.map((t) =>
     el("li", { class: "pc-" + t.status }, [ic(TARGET_ICON[t.status] || "circle-outline"), el("span", { class: "n" }, [t.name]), el("span", { class: "r" }, [targetProgressText(t)])])));
 
+  const unhealthy = p.targets.filter((t) => t.health && !t.health.ok);
+  const healthErr = !running && unhealthy.length ? el("div", { class: "pc-error", role: "alert" }, unhealthy.map((t) =>
+    el("div", {}, [t.name + ": " + t.health.error + " (" + t.health.url + ")"]))) : null;
   const err = p.error ? el("div", { class: "pc-error", role: "alert" }, [
     el("div", {}, [p.error.message]),
     p.error.detail ? el("pre", {}, [p.error.detail]) : null,
@@ -1224,7 +1248,7 @@ function progressCard() {
     link("Output", () => post({ type: "showOutput" }), "terminal"),
   ]);
 
-  return el("div", { id: "progress-card", class: "pc " + (running ? "running" : ok ? "ok" : "failed") }, [head, now, bar, rows, err, links]);
+  return el("div", { id: "progress-card", class: "pc " + (running ? "running" : ok && !p.healthFailed ? "ok" : "failed") }, [head, now, bar, rows, healthErr, err, links]);
 }
 
 function fmtBytes(n) {
@@ -1334,6 +1358,7 @@ function opsTargetCard(t) {
       kv("package", "Output", [t.localDir || "-"]),
       kv("cloud", "Server", [t.remoteDir || "-"]),
       t.restartFile ? kv("debug-restart", "Restart", [t.restartFile]) : null,
+      t.healthUrl ? kv("pulse", "Health", [t.healthUrl]) : null,
     ]),
   ]);
 }
@@ -1382,6 +1407,16 @@ function credentialRow(account, user, hasPassword, disabledReason) {
     el("span", { class: "cred-pass" + (hasPassword ? "" : " warn-text") }, [hasPassword ? "••••••••••••" : "No password saved"]),
     el("button", { class: "secondary", ...(disabledReason ? { disabled: "disabled", title: disabledReason } : { title: "Opens a secure input box" }),
       onclick: () => post({ type: "updateCredentials", account }) }, [ic("edit"), "Update Credentials"]),
+  ]);
+}
+
+function healthNote(index) {
+  if (!(index in healthNotes)) return null;
+  const r = healthNotes[index];
+  if (!r) return el("div", { class: "detect-note" }, [ic("loading", "codicon-modifier-spin"), el("span", {}, ["Checking..."])]);
+  return el("div", { class: "detect-note" + (r.ok ? "" : " bad"), role: "status" }, [
+    ic(r.ok ? "pass" : "warning"),
+    el("span", {}, [r.ok ? "Healthy: HTTP " + r.status + " in " + r.ms + " ms." : "Failed: " + r.error + "."]),
   ]);
 }
 
@@ -1461,7 +1496,11 @@ function configTargetCard(target, index) {
         credentialRow(target.ftpUser, null, hasPw, target.ftpUser ? null : "Enter the username first"),
       ]);
     }
-    advanced = el("div", { class: "advanced" }, [restartRow, restartInput, ownRow, ownFields, envVarsSection(target)]);
+    const expectInput = labeledInput("Health Check Must Contain", target.healthExpect, (v) => { target.healthExpect = v; }, {
+      placeholder: 'e.g. "status":"ok"  (optional)',
+      help: "Only pass the health check if the response contains this text.",
+    });
+    advanced = el("div", { class: "advanced" }, [restartRow, restartInput, ownRow, ownFields, expectInput, envVarsSection(target)]);
   }
 
   return el("div", { class: "card" + (collapsed ? " collapsed" : "") }, [
@@ -1471,6 +1510,15 @@ function configTargetCard(target, index) {
       el("div", { class: "with-btn" }, [buildInput, detectBtn]),
       detectNotes[index] ? el("div", { class: "detect-note" + (detectNotes[index].ok ? "" : " bad"), role: "status" }, [ic(detectNotes[index].ok ? "pass" : "warning"), el("span", {}, [detectNotes[index].text])]) : null,
       el("div", { class: "grid2" }, [localDirField, remoteDirInput]),
+      el("div", { class: "with-btn" }, [
+        labeledInput("Health Check URL", target.healthUrl, (v) => { target.healthUrl = v; }, {
+          placeholder: "https://example.com/  (optional)",
+          info: "Fetched after every deploy (3 tries, 5 s apart, to allow a Node app to restart). Passes on HTTP 200 to 399. Leave blank to skip.",
+        }),
+        el("button", { class: "secondary", title: "Fetch this URL now", ...((target.healthUrl || "").trim() ? {} : { disabled: "disabled" }),
+          onclick: () => post({ type: "testHealth", index, url: target.healthUrl, expect: target.healthExpect }) }, [ic("pulse"), "Test"]),
+      ]),
+      healthNote(index),
       advSwitch, advanced,
     ]),
   ]);
@@ -1629,6 +1677,7 @@ function targetProblems(targets) {
     if (!local) problems.push(label + ": Build Output Directory is empty. Pick the build folder, e.g. dist or out.");
     else if (local.split("/").includes("..")) problems.push(label + ": Build Output Directory must be inside the project.");
     if (!(t.remoteDir || "").trim()) problems.push(label + ": Server Destination Directory is empty.");
+    if ((t.healthUrl || "").trim() && !/^https?:[/][/][^ /]+/i.test(t.healthUrl.trim())) problems.push(label + ": Health Check URL must start with http:// or https://.");
   });
   return problems;
 }
