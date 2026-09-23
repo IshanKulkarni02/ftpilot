@@ -67,7 +67,8 @@ export function configExists(workspaceRoot: string): boolean {
   return fs.existsSync(configPath(workspaceRoot));
 }
 
-export function loadConfig(workspaceRoot: string): DeployConfig {
+/** `validate: false` is for the UI, which must still show an incomplete config so it can be fixed. */
+export function loadConfig(workspaceRoot: string, validate = true): DeployConfig {
   const p = configPath(workspaceRoot);
   if (!fs.existsSync(p)) {
     throw new Error(
@@ -76,12 +77,35 @@ export function loadConfig(workspaceRoot: string): DeployConfig {
   }
   const raw = fs.readFileSync(p, "utf8");
   const parsed = JSON.parse(raw) as DeployConfig;
-  if (!parsed.targets || parsed.targets.length === 0) {
+  parsed.targets ??= [];
+  if (!validate) return parsed;
+  if (parsed.targets.length === 0) {
     throw new Error(
       ".ftbdeploy/config.json has no targets configured. Edit it to add at least one deploy target."
     );
   }
+  const problems = validateTargets(parsed.targets);
+  if (problems.length) {
+    throw new Error(`.ftbdeploy/config.json is incomplete:\n  ${problems.join("\n  ")}`);
+  }
   return parsed;
+}
+
+/**
+ * Guards against uploading the wrong thing: an empty or "." localDir resolves to the whole
+ * workspace, which would push source code and .env secrets to the server.
+ */
+export function validateTargets(targets: DeployTarget[]): string[] {
+  const problems: string[] = [];
+  targets.forEach((t, i) => {
+    const label = t.name || `Target ${i + 1}`;
+    const local = (t.localDir ?? "").trim().replace(/^\.(\/|$)/, "").replace(/\/+$/, "");
+    if (!t.name?.trim()) problems.push(`${label}: Target Name is empty.`);
+    if (!local) problems.push(`${label}: Build Output Directory is empty (or the project root). Pick the build folder, e.g. dist or out.`);
+    else if (local.split("/").includes("..")) problems.push(`${label}: Build Output Directory must be inside the project.`);
+    if (!t.remoteDir?.trim()) problems.push(`${label}: Server Destination Directory is empty.`);
+  });
+  return problems;
 }
 
 export function saveConfig(workspaceRoot: string, config: DeployConfig): void {

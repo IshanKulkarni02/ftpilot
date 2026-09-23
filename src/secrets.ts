@@ -69,3 +69,14 @@ export async function setEnvSecret(
 ): Promise<void> {
   await context.secrets.store(envKey(workspaceRoot, targetId, varKey), value);
 }
+
+/** What the UI may show about a saved login: the username and whether a password exists — never the password. */
+export async function getLoginStatus(
+  context: vscode.ExtensionContext,
+  workspaceRoot: string,
+  account: string
+): Promise<{ user?: string; hasPassword: boolean }> {
+  const user = await context.secrets.get(userKey(workspaceRoot, account));
+  const password = await context.secrets.get(passKey(workspaceRoot, account));
+  return { user: user || undefined, hasPassword: !!password };
+}

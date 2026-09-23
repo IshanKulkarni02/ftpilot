@@ -28,3 +28,9 @@ export function checkoutBranch(cwd: string, branch: string): Promise<void> {
     });
   });
 }
+
+export function getShortCommit(cwd: string): Promise<string | undefined> {
+  return new Promise((resolve) => {
+    execFile("git", ["rev-parse", "--short", "HEAD"], { cwd }, (err, stdout) => resolve(err ? undefined : stdout.trim()));
+  });
+}
