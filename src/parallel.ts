@@ -5,6 +5,8 @@ export interface Job {
   label: string;
   bytes: number;
   attempts: number;
+  /** For metrics (Geek Mode / report charts). */
+  meta?: { kind: "upload" | "remove" | "snapshot" | "restore"; target: string; rel: string };
   run: (client: ftp.Client) => Promise<void>;
 }
 

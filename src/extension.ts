@@ -2,6 +2,8 @@ import * as vscode from "vscode";
 import { runDeploy, cancelDeploy, runRollback } from "./deploy";
 import { listSnapshots } from "./rollback";
 import { DeployState } from "./progress";
+import { Dashboard } from "./dashboard";
+import { Metrics } from "./metrics";
 import { runBackup } from "./backup";
 import { setCredentials } from "./secrets";
 import { configPath, configExists, loadConfig } from "./config";
@@ -25,7 +27,12 @@ export function activate(context: vscode.ExtensionContext): void {
   context.subscriptions.push(output, statusBar);
 
   panel = new FtpilotPanel(context);
-  const onProgress = (state: DeployState) => panel.reportProgress(state);
+  const dashboard = new Dashboard();
+  context.subscriptions.push(dashboard);
+  const onProgress = (state: DeployState, metrics?: Metrics) => {
+    panel.reportProgress(state);
+    dashboard.update(state, metrics);
+  };
   context.subscriptions.push(panel); // closes any open "Check connection" FTP session on deactivate
   context.subscriptions.push(
     // Keep the form alive while the sidebar is hidden, so unsaved typing (incl. passwords) isn't lost.
@@ -34,6 +41,14 @@ export function activate(context: vscode.ExtensionContext): void {
     }),
     vscode.commands.registerCommand("ftpilot.openInEditor", () => panel.openInEditor()),
     vscode.commands.registerCommand("ftpilot.showOutput", () => output.show(true)),
+    vscode.commands.registerCommand("ftpilot.openDashboard", () => dashboard.open()),
+    vscode.commands.registerCommand("ftpilot.toggleGeekMode", async () => {
+      const cfg = vscode.workspace.getConfiguration("ftpilot");
+      const on = !cfg.get<boolean>("geekMode", false);
+      await cfg.update("geekMode", on, vscode.ConfigurationTarget.Global);
+      void vscode.window.showInformationMessage(on ? "FTPilot: Geek Mode on. The dashboard opens when a deploy starts." : "FTPilot: Geek Mode off.");
+    }),
+    vscode.workspace.onDidChangeConfiguration((e) => { if (e.affectsConfiguration("ftpilot.geekMode")) panel.refresh(); }),
     vscode.commands.registerCommand("ftpilot.cancelDeploy", () => cancelDeploy()),
     // From the panel (already confirmed there) or the Command Palette (pick + confirm here).
     vscode.commands.registerCommand("ftpilot.rollback", async (args?: { snapshotId?: string; confirmed?: boolean }) => {

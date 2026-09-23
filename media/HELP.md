@@ -53,6 +53,18 @@ Open it with the gear icon. Changes are kept as a draft until you **Save Configu
 - Shared cPanel hosts often have a certificate for the *server's* hostname, not `ftp.yourdomain`. The test reads the certificate and offers **Use &lt;that hostname&gt;**, which is the safe fix.
 - **Allow invalid or mismatched certificate** only appears after a certificate problem. It keeps encryption but skips verification, so use it only as a last resort.
 
+## Geek Mode (optional, off by default)
+
+Turn on with Command Palette → **FTPilot: Toggle Geek Mode** (or Settings → `ftpilot.geekMode`). While it's off, no dashboard buttons appear anywhere.
+
+When on, a live **FTPilot Dashboard** opens beside your editor whenever a deploy, preview or rollback starts (reopen it from the dashboard icon in the sidebar title bar or on the progress card):
+
+- **Meters:** files/sec, throughput, connections in use, progress + ETA, average file time, errors/retries
+- **Charts:** files/sec and throughput over time, connections over time (with back-off markers), where the time went per target, connection lanes (every file on every connection), time vs file size, file-time distribution (median / p95)
+- **Tables:** per target, by file type, slowest 10, largest 10, connection events, session details, build output tail
+
+Hover any mark for exact values. The same charts are included in every deploy report, so they survive **Print → Save as PDF**.
+
 ## Where things are stored
 
 - `.ftbdeploy/config.json`: settings, no secrets. Safe to commit.

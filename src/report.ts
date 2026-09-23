@@ -2,6 +2,9 @@ import * as fs from "fs";
 import * as path from "path";
 import { configDir } from "./config";
 import { DeployState } from "./progress";
+import { Metrics } from "./metrics";
+import { dashboardSections } from "./dashboard";
+import { CHART_CSS } from "./charts";
 
 const MAX_FILES_LISTED = 2000;
 
@@ -56,7 +59,7 @@ function stampOf(s: DeployState): string {
  * Writes a self-contained, print-ready HTML report (open in a browser, Print → Save as PDF)
  * to .ftbdeploy/reports/, which gets its own "*" .gitignore so reports never get committed.
  */
-export function writeReport(workspaceRoot: string, s: DeployState): string {
+export function writeReport(workspaceRoot: string, s: DeployState, m?: Metrics): string {
   const started = new Date(s.startedAt);
   const file = path.join(reportsDir(workspaceRoot), `deploy-${stampOf(s)}.html`);
   const ok = s.phase === "done";
@@ -103,6 +106,26 @@ export function writeReport(workspaceRoot: string, s: DeployState): string {
     return lists ? `<section class="target"><h3>${esc(t.name)}</h3>${lists}</section>` : "";
   }).join("");
 
+  // Same charts as Geek Mode, static and light-themed, so they survive printing to PDF.
+  const perf = m && !preview && (m.files.length || m.phases.length) ? (() => {
+    const d = dashboardSections(s, m);
+    const fig = (title: string, body: string, wide = false) => `<figure${wide ? ' class="wide"' : ""}><figcaption>${esc(title)}</figcaption>${body}</figure>`;
+    return `<h2>Performance</h2>
+      <div class="figs">
+        ${fig("Where the time went", d.phases)}
+        ${fig("Files per second", d.speed)}
+        ${fig(d.mbTitle, d.mb)}
+        ${fig("Connections (markers: back-offs)", d.conns)}
+        ${fig("File time distribution", d.hist)}
+        ${fig("Time vs file size", d.scatter)}
+        ${fig("Connection lanes", d.lanes, true)}
+      </div>
+      <div class="figs">
+        ${fig("By file type", d.types)}
+        ${fig("Slowest 10 files", d.slowest)}
+      </div>`;
+  })() : "";
+
   const html = `<!DOCTYPE html>
 <html lang="en"><head><meta charset="utf-8">
 <title>FTPilot report: ${esc(s.project)} ${esc(started.toLocaleString())}</title>
@@ -124,6 +147,15 @@ export function writeReport(workspaceRoot: string, s: DeployState): string {
   pre { white-space: pre-wrap; word-break: break-word; font: 11px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace; background: #f6f8fa; border: 1px solid var(--line); border-radius: 6px; padding: 8px 10px; margin: 8px 0 0; }
   ul.files { columns: 2; column-gap: 24px; margin: 0; padding-left: 18px; font: 11px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; }
   ul.events { margin: 0; padding-left: 18px; font-size: 12px; }
+  body { --s1:#2a78d6; --s2:#eb6834; --s3:#1baf7a; --s4:#eda100; --warn:#fab219; --crit:#d03b3b; --on-fill:#fff;
+    --surface:#fff; --ink:#1f2328; --ink2:#59636e; --muted:#6e7781; --grid:#e1e0d9; --axis:#c3c2b7; --track:rgba(42,120,214,.16); }
+  ${CHART_CSS}
+  .figs { display: grid; grid-template-columns: repeat(auto-fit, minmax(420px, 1fr)); gap: 16px; margin-top: 8px; }
+  figure { margin: 0; break-inside: avoid; }
+  figure.wide { grid-column: 1 / -1; }
+  figcaption { font-size: 12px; font-weight: 600; color: var(--muted); margin-bottom: 6px; }
+  figure table { font-size: 11px; }
+  code { font: 11px ui-monospace, SFMono-Regular, Menlo, monospace; word-break: break-all; }
   .hint { margin-top: 32px; } @media print { .hint { display: none; } body { margin: 0; max-width: none; } section.target { break-inside: avoid-page; } }
 </style></head>
 <body>
@@ -165,6 +197,7 @@ export function writeReport(workspaceRoot: string, s: DeployState): string {
     <tbody>${rows}</tbody>
   </table>`}
   ${s.events?.length ? `<h2>Connection events</h2><ul class="events">${s.events.map((e) => `<li><span class="muted">${esc(new Date(e.t).toLocaleTimeString())}</span> ${esc(e.message)}</li>`).join("")}</ul>` : ""}
+  ${perf}
   ${details ? `<h2>Files</h2>${details}` : ""}
   ${s.logPath ? `<p class="muted">Full log: <a href="${esc(path.basename(s.logPath))}">${esc(path.basename(s.logPath))}</a></p>` : ""}
   <p class="hint muted">To save as PDF: File → Print (Cmd/Ctrl+P) → Save as PDF.</p>

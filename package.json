@@ -70,6 +70,15 @@
         "command": "ftpilot.cancelDeploy",
         "title": "FTPilot: Cancel Running Deploy",
         "icon": "$(debug-stop)"
+      },
+      {
+        "command": "ftpilot.toggleGeekMode",
+        "title": "FTPilot: Toggle Geek Mode"
+      },
+      {
+        "command": "ftpilot.openDashboard",
+        "title": "FTPilot: Open Geek Mode Dashboard",
+        "icon": "$(dashboard)"
       }
     ],
     "viewsContainers": {
@@ -93,6 +102,11 @@
     "menus": {
       "view/title": [
         {
+          "command": "ftpilot.openDashboard",
+          "when": "view == ftpilotPanel && config.ftpilot.geekMode",
+          "group": "navigation@0"
+        },
+        {
           "command": "ftpilot.openInEditor",
           "when": "view == ftpilotPanel",
           "group": "navigation@1"
@@ -102,7 +116,27 @@
           "when": "view == ftpilotPanel",
           "group": "navigation@2"
         }
+      ],
+      "commandPalette": [
+        {
+          "command": "ftpilot.openDashboard",
+          "when": "config.ftpilot.geekMode"
+        },
+        {
+          "command": "ftpilot.deployTarget",
+          "when": "false"
+        }
       ]
+    },
+    "configuration": {
+      "title": "FTPilot",
+      "properties": {
+        "ftpilot.geekMode": {
+          "type": "boolean",
+          "default": false,
+          "markdownDescription": "**Geek Mode**: open a live dashboard (gauges, throughput and connection charts, per-file timings, event log) whenever a deploy starts. Off by default; when off, all dashboard entry points are hidden."
+        }
+      }
     }
   },
   "scripts": {

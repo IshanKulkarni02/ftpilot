@@ -1,4 +1,5 @@
 import type { HealthResult } from "./health";
+import type { Metrics } from "./metrics";
 
 export type TargetStatus = "pending" | "building" | "built" | "uploading" | "done" | "failed";
 
@@ -84,7 +85,11 @@ export interface DeployState {
 export class DeployTracker {
   private timer?: NodeJS.Timeout;
 
-  constructor(public readonly state: DeployState, private readonly listener?: (s: DeployState) => void) {
+  constructor(
+    public readonly state: DeployState,
+    private readonly listener?: (s: DeployState, m?: Metrics) => void,
+    public readonly metrics?: Metrics
+  ) {
     this.emitNow();
   }
 
@@ -101,7 +106,7 @@ export class DeployTracker {
   emitNow(): void {
     clearTimeout(this.timer);
     this.timer = undefined;
-    this.listener?.(this.state);
+    this.listener?.(this.state, this.metrics);
   }
 }
 

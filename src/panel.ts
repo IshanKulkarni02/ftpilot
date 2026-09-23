@@ -28,6 +28,7 @@ type InMsg =
   | { type: "showOutput" }
   | { type: "dismissProgress" }
   | { type: "cancelDeploy" }
+  | { type: "openDashboard" }
   | { type: "preview"; targetId?: string; compareRemote?: boolean; skipBuild?: boolean }
   | { type: "deployFromPreview" }
   | { type: "rollback"; id: string }
@@ -74,6 +75,8 @@ type InitMeta = {
   targetLogins: Record<string, boolean>;
   /** target id -> env keys whose secret value is saved */
   envSecretsSet: Record<string, string[]>;
+  /** Geek Mode setting: when off, no dashboard entry points are shown. */
+  geekMode: boolean;
 };
 
 type ConnState = {
@@ -228,6 +231,7 @@ export class FtpilotPanel implements vscode.WebviewViewProvider {
       login: await getLoginStatus(this.context, root, "default"),
       targetLogins,
       envSecretsSet,
+      geekMode: vscode.workspace.getConfiguration("ftpilot").get<boolean>("geekMode", false),
     };
   }
 
@@ -398,6 +402,10 @@ export class FtpilotPanel implements vscode.WebviewViewProvider {
       case "deployFromPreview":
         await vscode.commands.executeCommand("ftpilot.deployPreview", { targetId: this.progress?.onlyTargetId });
         this.postInit();
+        return;
+
+      case "openDashboard":
+        await vscode.commands.executeCommand("ftpilot.openDashboard");
         return;
 
       case "cancelDeploy":
@@ -1206,6 +1214,7 @@ function progressCard() {
     ic(running ? "loading codicon-modifier-spin" : ok && !p.healthFailed ? "pass-filled" : ok ? "warning" : "error"),
     el("strong", {}, [title]),
     el("span", { class: "muted pc-time" }, [fmtMs((p.finishedAt || Date.now()) - p.startedAt)]),
+    meta && meta.geekMode ? iconBtn("dashboard", "Open Geek Mode dashboard", () => post({ type: "openDashboard" })) : null,
     running ? null : iconBtn("close", "Dismiss", () => post({ type: "dismissProgress" })),
   ]);
 
