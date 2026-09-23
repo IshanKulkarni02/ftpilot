@@ -4,12 +4,17 @@
   "description": "Build and FTP-deploy a git 'deploy' branch to multiple cPanel domains/subdomains, one click.",
   "version": "0.1.0",
   "publisher": "local",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/IshanKulkarni02/ftpilot.git"
+  },
   "engines": {
     "vscode": "^1.85.0"
   },
   "categories": ["Other"],
   "activationEvents": ["onStartupFinished"],
   "main": "./out/extension.js",
+  "icon": "media/icon.png",
   "contributes": {
     "commands": [
       {

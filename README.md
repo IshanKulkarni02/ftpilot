@@ -1,5 +1,7 @@
 # FTPilot
 
+<img src="media/logo-full.png" alt="FTPilot" width="360" />
+
 VS Code extension: build your project and FTP-deploy it to a cPanel server (or multiple domains/subdomains) with one click, from a dedicated `deploy` git branch.
 
 ## What it does
