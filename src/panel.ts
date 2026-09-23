@@ -291,7 +291,13 @@ function defaultConfig() {
   return { deployBranch: "deploy", host: "", port: 21, secure: false, uploadMode: "incremental", targets: [] };
 }
 function blankTarget() {
-  return { name: "", buildCommand: "", cwd: "", localDir: "", remoteDir: "", env: [] };
+  return { id: genId(), name: "", buildCommand: "", cwd: "", localDir: "", remoteDir: "", env: [] };
+}
+
+// Stable per-target id so env secrets survive a rename (SecretStorage is keyed by id, not
+// the display name). Doesn't need to be cryptographically strong, just unique within this config.
+function genId() {
+  return Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
 }
 
 // Framework convention: these get shipped into the client bundle at build time regardless
@@ -316,6 +322,9 @@ window.addEventListener("message", (e) => {
   if (msg.type === "init") {
     workspaceOpen = msg.workspaceOpen;
     cfg = msg.config || defaultConfig();
+    // Backfill ids for targets saved before "id" existed, so env secrets become
+    // rename-safe from here on (persisted next time the config is saved).
+    for (const t of cfg.targets) { if (!t.id) t.id = genId(); if (!t.env) t.env = []; }
     view = "form";
     // Index-keyed UI toggle state (which target's Advanced section is expanded) would
     // otherwise leak onto the wrong target if targets are added/removed and indices get
@@ -331,7 +340,10 @@ window.addEventListener("message", (e) => {
       if (!t.env) t.env = [];
       const existingKeys = new Set(t.env.map((v) => v.key));
       for (const key of msg.envKeys) {
-        if (!existingKeys.has(key)) t.env.push({ key, value: "", secret: guessSecret(key) });
+        if (!existingKeys.has(key)) {
+          t.env.push({ key, value: "", secret: guessSecret(key) });
+          existingKeys.add(key);
+        }
       }
     }
     render();
@@ -498,7 +510,7 @@ function targetCard(target, index) {
 }
 
 function envVarRow(target, targetIndex, envVar, envIndex) {
-  const targetKey = target.name || ("target_" + targetIndex);
+  const targetKey = target.id;
   const keyInput = el("input", {
     type: "text", value: envVar.key || "", placeholder: "VITE_API_URL",
     oninput: (e) => { envVar.key = e.target.value; },
@@ -621,7 +633,7 @@ function renderConfirmBackup() {
 
 function stripConfig(c) {
   const targets = c.targets.map((t) => {
-    const clean = { name: t.name, localDir: t.localDir, remoteDir: t.remoteDir };
+    const clean = { id: t.id, name: t.name, localDir: t.localDir, remoteDir: t.remoteDir };
     if (t.buildCommand) clean.buildCommand = t.buildCommand;
     if (t.cwd) clean.cwd = t.cwd;
     if (t.restartFile) clean.restartFile = t.restartFile;

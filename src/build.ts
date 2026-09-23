@@ -10,20 +10,50 @@ async function resolveEnv(
   target: DeployTarget
 ): Promise<NodeJS.ProcessEnv> {
   const env: NodeJS.ProcessEnv = { ...process.env };
+  const secretsId = target.id || target.name;
   for (const v of target.env ?? []) {
     if (v.secret) {
-      const stored = await getEnvSecret(context, workspaceRoot, target.name, v.key);
+      const stored = await getEnvSecret(context, workspaceRoot, secretsId, v.key);
       if (!stored) {
         throw new Error(
           `[${target.name}] env var '${v.key}' is marked secret but has no value saved. Set it in the FTPilot panel first.`
         );
       }
       env[v.key] = stored;
-    } else if (v.value) {
-      env[v.key] = v.value;
+    } else {
+      // Every entry here was explicitly declared in the panel, even ones the user left
+      // blank — inject it as-is rather than silently falling through to the ambient shell env.
+      env[v.key] = v.value ?? "";
     }
   }
   return env;
+}
+
+/**
+ * Checks every target's declared secret env vars exist in SecretStorage before any target
+ * builds. Without this, a deploy builds targets one by one and only discovers a missing
+ * secret partway through — by then earlier targets already built (wasted work) and the
+ * whole deploy still aborts, uploading nothing, even for targets with no env vars at all.
+ */
+export async function validateEnvSecrets(
+  context: vscode.ExtensionContext,
+  workspaceRoot: string,
+  targets: DeployTarget[]
+): Promise<void> {
+  const missing: string[] = [];
+  for (const target of targets) {
+    const secretsId = target.id || target.name;
+    for (const v of target.env ?? []) {
+      if (!v.secret) continue;
+      const stored = await getEnvSecret(context, workspaceRoot, secretsId, v.key);
+      if (!stored) missing.push(`${target.name}: ${v.key}`);
+    }
+  }
+  if (missing.length) {
+    throw new Error(
+      `Missing env secret value(s) — set these in the FTPilot panel before deploying:\n  ${missing.join("\n  ")}`
+    );
+  }
 }
 
 export async function runBuild(

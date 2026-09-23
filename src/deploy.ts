@@ -4,7 +4,7 @@ import * as path from "path";
 import { loadConfig, manifestPath, updateTargetLocalDir, DeployTarget } from "./config";
 import { getCredentials } from "./secrets";
 import { getCurrentBranch, checkoutBranch } from "./git";
-import { runBuild } from "./build";
+import { runBuild, validateEnvSecrets } from "./build";
 import { loadManifest, saveManifest, hashTarget, diffTarget, Manifest } from "./manifest";
 import { snapshotTopLevelDirs, diffTopLevelDirs } from "./detect";
 import * as ftpClient from "./ftpClient";
@@ -82,7 +82,11 @@ export async function runDeploy(
   let currentAccount = "";
 
   try {
-    // 1. Build each target. If the configured output folder doesn't exist afterwards
+    // 1. Fail fast on any missing secret env var before building anything, so one
+    // unset secret on one target doesn't waste time building the others first.
+    await validateEnvSecrets(context, workspaceRoot, config.targets);
+
+    // 2. Build each target. If the configured output folder doesn't exist afterwards
     // (wrong/never-detected localDir), fall back to detecting which folder the build
     // actually just created/touched, use that, and persist the fix to config.json.
     for (const target of config.targets) {
@@ -110,7 +114,7 @@ export async function runDeploy(
       }
     }
 
-    // 2. Hash all targets' build output into one combined manifest
+    // 3. Hash all targets' build output into one combined manifest
     const newManifest: Manifest = {};
     for (const target of config.targets) {
       const localDir = path.join(workspaceRoot, target.localDir);
@@ -123,7 +127,7 @@ export async function runDeploy(
     let totalUploaded = 0;
     let totalRemoved = 0;
 
-    // 3. Upload each target (connecting/reconnecting per FTP account as needed)
+    // 4. Upload each target (connecting/reconnecting per FTP account as needed)
     for (const target of config.targets) {
       const account = target.ftpUser ?? "default";
       const creds = await getCredentials(context, workspaceRoot, account);

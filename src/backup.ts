@@ -1,7 +1,7 @@
 import * as vscode from "vscode";
 import * as fs from "fs";
 import * as path from "path";
-import archiver from "archiver";
+import { ZipArchive } from "archiver";
 import { loadConfig, configDir } from "./config";
 import { getCredentials } from "./secrets";
 import * as ftpClient from "./ftpClient";
@@ -52,7 +52,8 @@ export async function runBackup(
   let currentAccount = "";
 
   try {
-    for (const target of config.targets) {
+    for (let i = 0; i < config.targets.length; i++) {
+      const target = config.targets[i];
       const account = target.ftpUser ?? "default";
       const creds = await getCredentials(context, workspaceRoot, account);
       if (!creds) {
@@ -70,7 +71,7 @@ export async function runBackup(
         currentAccount = account;
       }
 
-      const targetStagingDir = path.join(stagingDir, sanitizeName(target.name));
+      const targetStagingDir = path.join(stagingDir, `${i}-${sanitizeName(target.name)}`);
       output.appendLine(`\n=== Backing up: ${target.name} (${target.remoteDir}) ===`);
       await ftpClient.downloadDir(client, target.remoteDir, targetStagingDir);
     }
@@ -104,7 +105,7 @@ function sanitizeName(name: string): string {
 function compressDir(sourceDir: string, destZip: string): Promise<void> {
   return new Promise((resolve, reject) => {
     const out = fs.createWriteStream(destZip);
-    const archive = archiver("zip", { zlib: { level: 9 } });
+    const archive = new ZipArchive({ zlib: { level: 9 } });
     out.on("close", () => resolve());
     out.on("error", (err: Error) => reject(err));
     archive.on("error", (err: Error) => reject(err));

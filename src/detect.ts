@@ -90,13 +90,17 @@ export function detectEnvKeys(cwd: string): string[] {
   if (!raw) return [];
 
   const keys: string[] = [];
+  const seen = new Set<string>();
   for (const line of raw.split(/\r?\n/)) {
     const trimmed = line.trim();
     if (!trimmed || trimmed.startsWith("#")) continue;
     const eq = trimmed.indexOf("=");
     if (eq <= 0) continue;
     const key = trimmed.slice(0, eq).trim();
-    if (/^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) keys.push(key);
+    if (/^[A-Za-z_][A-Za-z0-9_]*$/.test(key) && !seen.has(key)) {
+      seen.add(key);
+      keys.push(key);
+    }
   }
   return keys;
 }

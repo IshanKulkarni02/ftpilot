@@ -41,26 +41,31 @@ export async function setCredentials(
   await context.secrets.store(passKey(workspaceRoot, account), creds.password);
 }
 
-function envKey(workspaceRoot: string, targetName: string, varKey: string): string {
-  return `ftpilot:${workspaceRoot}:env:${targetName}:${varKey}`;
+function envKey(workspaceRoot: string, targetId: string, varKey: string): string {
+  return `ftpilot:${workspaceRoot}:env:${targetId}:${varKey}`;
 }
 
-/** Secret-flagged env var values, stored per target+key so each contributor sets their own copy locally (same model as FTP credentials). */
+/**
+ * Secret-flagged env var values, stored per target+key so each contributor sets their own
+ * copy locally (same model as FTP credentials). `targetId` should be the target's stable
+ * `id` (falling back to `name` only for targets saved before `id` existed) — keying by the
+ * mutable display name would orphan the secret the moment someone renames the target.
+ */
 export async function getEnvSecret(
   context: vscode.ExtensionContext,
   workspaceRoot: string,
-  targetName: string,
+  targetId: string,
   varKey: string
 ): Promise<string | undefined> {
-  return context.secrets.get(envKey(workspaceRoot, targetName, varKey));
+  return context.secrets.get(envKey(workspaceRoot, targetId, varKey));
 }
 
 export async function setEnvSecret(
   context: vscode.ExtensionContext,
   workspaceRoot: string,
-  targetName: string,
+  targetId: string,
   varKey: string,
   value: string
 ): Promise<void> {
-  await context.secrets.store(envKey(workspaceRoot, targetName, varKey), value);
+  await context.secrets.store(envKey(workspaceRoot, targetId, varKey), value);
 }

@@ -9,6 +9,12 @@ export interface EnvVar {
 }
 
 export interface DeployTarget {
+  /**
+   * Stable id assigned when the target is created, used as the SecretStorage key for its
+   * env secrets so they survive a rename. Targets saved before this field existed won't have
+   * one — env-secret lookups fall back to `name` for those until the panel is opened and saved.
+   */
+  id?: string;
   /** Friendly name, e.g. "Frontend (app.example.com)" */
   name: string;
   /** Shell command to build this target, run from `cwd`. Omit if no build step (e.g. plain PHP). */
