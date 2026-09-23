@@ -73,7 +73,9 @@ export async function runBuild(
   target: DeployTarget,
   workspaceRoot: string,
   output: LogSink,
-  onLine?: (line: string) => void
+  onLine?: (line: string) => void,
+  /** Receives a function that kills the build (used by Cancel). */
+  onSpawn?: (kill: () => void) => void
 ): Promise<void> {
   if (!target.buildCommand) {
     return;
@@ -84,10 +86,21 @@ export async function runBuild(
   output.appendLine(`\n[${target.name}] $ ${target.buildCommand}  (cwd: ${cwd})`);
 
   return new Promise((resolve, reject) => {
+    // Own process group on POSIX, so Cancel can stop npm *and* the compiler it spawned.
+    const detached = process.platform !== "win32";
     const child = spawn(target.buildCommand as string, {
       cwd,
       shell: true,
       env,
+      detached,
+    });
+    onSpawn?.(() => {
+      try {
+        if (detached && child.pid) process.kill(-child.pid, "SIGTERM");
+        else child.kill();
+      } catch {
+        // already exited
+      }
     });
 
     const tail: string[] = [];

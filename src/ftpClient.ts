@@ -21,35 +21,18 @@ export async function connect(
   return client;
 }
 
-function remoteJoin(remoteDir: string, relPath: string): string {
+export function remoteJoin(remoteDir: string, relPath: string): string {
   // Always use posix-style separators for FTP paths, regardless of host OS.
   const normalizedRel = relPath.split(path.sep).join("/");
   return `${remoteDir.replace(/\/+$/, "")}/${normalizedRel}`;
 }
 
-/**
- * Uploads the given relative paths one by one, reporting each finished file, so the UI can
- * show "37 / 120". Remote dirs are created once per run (cached), not once per file.
- */
-export async function uploadFiles(
-  client: ftp.Client,
-  localDir: string,
-  remoteDir: string,
-  relPaths: string[],
-  onFile: (relPath: string) => void
-): Promise<void> {
-  const ensured = new Set<string>();
+/** Creates each remote directory (and parents) once; call before parallel uploads so connections never race on MKD. */
+export async function ensureDirs(client: ftp.Client, dirs: string[]): Promise<void> {
   const home = await client.pwd();
-  for (const relPath of relPaths) {
-    const remotePath = remoteJoin(remoteDir, relPath);
-    const dir = path.posix.dirname(remotePath);
-    if (!ensured.has(dir)) {
-      await client.ensureDir(dir);
-      await client.cd(home);
-      ensured.add(dir);
-    }
-    await client.uploadFrom(path.join(localDir, relPath), remotePath);
-    onFile(relPath);
+  for (const dir of dirs) {
+    await client.ensureDir(dir);
+    await client.cd(home);
   }
 }
 

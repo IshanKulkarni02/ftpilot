@@ -11,6 +11,7 @@ FTPilot builds your project and uploads it over FTP to one or more cPanel domain
 | **Backup** | Downloads every target's remote files into `.ftbdeploy/backups/*.zip`. Changes nothing on the server. |
 | **Full Re-upload** | Uploads every file again, ignoring what changed. |
 | Pulse icon | Tests the FTP login and checks each target's remote folder exists. |
+| **Cancel** (progress card) | Stops after the files currently uploading, or kills the running build. |
 | Plug icon | Keeps a connection open (with keep-alive) until you disconnect. |
 
 The branch row shows a check when you are on the deploy branch, and a warning when you are not. Deploying from another branch asks you first.
@@ -23,6 +24,8 @@ Open it with the gear icon. Changes are kept as a draft until you **Save Configu
 |---|---|
 | **Deploy Branch** | Deploys are meant to run from this branch only. |
 | **Deployment Strategy** | *Incremental* uploads changed files and deletes files FTPilot uploaded earlier that no longer exist. *Full* overwrites everything and never deletes. |
+| **Max Parallel Connections** | Upper limit for simultaneous uploads (1–10, default 8). FTPilot starts at 2, adds connections while it keeps getting faster, backs off if the server refuses, and remembers the best number per server. |
+| **Exclude Patterns** | Files never uploaded, e.g. `*.map, *.d.ts` (the default). A pattern without `/` matches at any depth. |
 | **Working Directory** | Folder where the build command runs, e.g. `apps/web`. |
 | **Build Command** | e.g. `npm run build`. Leave blank if there is no build step. |
 | **Build Output Directory** | Folder whose contents get uploaded, e.g. `apps/web/out`. |

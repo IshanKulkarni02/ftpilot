@@ -26,6 +26,7 @@ type InMsg =
   | { type: "openLog" }
   | { type: "showOutput" }
   | { type: "dismissProgress" }
+  | { type: "cancelDeploy" }
   | {
       type: "saveConfig";
       config: DeployConfig;
@@ -337,6 +338,10 @@ export class FtpilotPanel implements vscode.WebviewViewProvider {
 
       case "showOutput":
         await vscode.commands.executeCommand("ftpilot.showOutput");
+        return;
+
+      case "cancelDeploy":
+        await vscode.commands.executeCommand("ftpilot.cancelDeploy");
         return;
 
       case "dismissProgress":
@@ -703,6 +708,7 @@ const CSS = `
   .pc-bar { height: 4px; margin-top: 8px; border-radius: 2px; background: var(--vscode-progressBar-background, var(--vscode-button-background)); background: color-mix(in srgb, var(--vscode-progressBar-background, #0078d4) 20%, transparent); overflow: hidden; }
   .pc-bar > div { height: 100%; background: var(--vscode-progressBar-background, var(--vscode-button-background)); transition: width .2s; }
   .pc-count { display: flex; justify-content: space-between; margin-top: 3px; font-variant-numeric: tabular-nums; }
+  .pc-stats { margin-top: 2px; font-variant-numeric: tabular-nums; }
   .pc-targets { list-style: none; margin: 8px 0 0; padding: 0; }
   .pc-targets li { display: grid; grid-template-columns: 16px minmax(0, 1fr) auto; gap: 6px; align-items: center; min-height: 20px; }
   .pc-targets .codicon { font-size: 14px; color: var(--vscode-descriptionForeground); }
@@ -789,7 +795,7 @@ document.addEventListener("input", scheduleDraft);
 document.addEventListener("change", scheduleDraft);
 
 function defaultConfig() {
-  return { deployBranch: "deploy", host: "", port: 21, secure: false, uploadMode: "incremental", targets: [] };
+  return { deployBranch: "deploy", host: "", port: 21, secure: false, uploadMode: "incremental", maxConnections: 8, exclude: ["*.map", "*.d.ts"], targets: [] };
 }
 function blankTarget() {
   return { id: genId(), name: "", buildCommand: "", cwd: "", localDir: "", remoteDir: "", env: [] };
@@ -834,6 +840,9 @@ window.addEventListener("message", (e) => {
     const disk = saved ? JSON.parse(JSON.stringify(saved)) : defaultConfig();
     // Backfill ids for targets saved before "id" existed (persisted on next save).
     for (const t of disk.targets) { if (!t.id) t.id = genId(); if (!t.env) t.env = []; }
+    // Configs saved before these settings existed get the defaults, without counting as an edit.
+    if (disk.maxConnections === undefined) disk.maxConnections = 8;
+    if (!disk.exclude) disk.exclude = ["*.map", "*.d.ts"];
     baseline = JSON.stringify(disk);
     hasDraft = !!msg.draft;
     cfg = MODE === "config" && msg.draft ? msg.draft : disk;
@@ -1036,7 +1045,12 @@ function stripConfig(c) {
     if (env.length) clean.env = env;
     return clean;
   });
-  return { deployBranch: c.deployBranch, host: c.host, port: c.port, secure: c.secure, uploadMode: c.uploadMode, targets };
+  return {
+    deployBranch: c.deployBranch, host: c.host, port: c.port, secure: c.secure, uploadMode: c.uploadMode,
+    maxConnections: c.maxConnections || 8,
+    exclude: (c.exclude || []).map((p) => p.trim()).filter(Boolean),
+    targets,
+  };
 }
 
 /* ---------- Connection widgets ---------- */
@@ -1100,7 +1114,7 @@ function progressCard() {
   if (!p || MODE !== "ops") return null;
   const running = isRunning(p);
   const ok = p.phase === "done";
-  const title = running ? (PHASE_TITLE[p.phase] || "Working") : ok ? "Deploy succeeded" : "Deploy failed";
+  const title = running ? (PHASE_TITLE[p.phase] || "Working") : ok ? "Deploy succeeded" : p.cancelled ? "Deploy cancelled" : "Deploy failed";
   const head = el("div", { class: "pc-head" }, [
     ic(running ? "loading codicon-modifier-spin" : ok ? "pass-filled" : "error"),
     el("strong", {}, [title]),
@@ -1119,9 +1133,20 @@ function progressCard() {
   let bar = null;
   if (p.totalOps > 0) {
     const pct = Math.min(100, Math.floor((p.doneOps / p.totalOps) * 100));
+    const stats = [];
+    if (running && p.phase === "uploading") {
+      stats.push((p.connections || 0) + (p.connections === 1 ? " connection" : " connections"));
+      if (p.rate) stats.push(p.rate.toFixed(1) + " files/s");
+      const remaining = p.totalOps - p.doneOps;
+      if (p.rate && remaining > 0) stats.push("~" + fmtMs((remaining / p.rate) * 1000) + " left");
+    } else if (!running && p.peakConnections) {
+      stats.push("peak " + p.peakConnections + " connections");
+    }
+    if (p.retries) stats.push(p.retries + (p.retries === 1 ? " retry" : " retries"));
     bar = el("div", {}, [
       el("div", { class: "pc-bar", role: "progressbar", "aria-valuemin": "0", "aria-valuemax": "100", "aria-valuenow": String(pct) }, [el("div", { style: "width:" + pct + "%" }, [])]),
       el("div", { class: "pc-count muted" }, [p.doneOps + " / " + p.totalOps + " files", el("span", {}, [pct + "%"])]),
+      stats.length ? el("div", { class: "pc-stats muted" }, [stats.join(" \u00b7 ")]) : null,
     ]);
   } else if (ok) {
     bar = el("div", { class: "pc-count muted" }, ["No files changed; nothing to upload."]);
@@ -1135,7 +1160,10 @@ function progressCard() {
     p.error.detail ? el("pre", {}, [p.error.detail]) : null,
   ]) : null;
 
-  const links = running ? null : el("div", { class: "pc-links" }, [
+  const links = running ? el("div", { class: "pc-links" }, [
+    link("Cancel", () => post({ type: "cancelDeploy" }), "debug-stop"),
+    link("Output", () => post({ type: "showOutput" }), "terminal"),
+  ]) : el("div", { class: "pc-links" }, [
     p.reportPath ? link("Open Report", () => post({ type: "openReport" }), "file") : null,
     p.logPath ? link("Open Log", () => post({ type: "openLog" }), "output") : null,
     link("Output", () => post({ type: "showOutput" }), "terminal"),
@@ -1400,6 +1428,21 @@ function renderConfig(root) {
         [{ value: "incremental", label: "Incremental (Sync changed files only)" }, { value: "full", label: "Full (Overwrite remote files)" }],
         (v) => { cfg.uploadMode = v; scheduleDraft(); },
         { info: "Incremental also deletes remote files FTPilot uploaded earlier that no longer exist locally. Full never deletes." }),
+    ]),
+  ]));
+
+  root.appendChild(section("upload", "Upload", [
+    el("div", { class: "grid2" }, [
+      labeledInput("Max Parallel Connections", String(cfg.maxConnections), (v) => { cfg.maxConnections = Math.max(1, Math.min(10, parseInt(v, 10) || 1)); }, {
+        type: "number",
+        info: "FTPilot starts with 2 connections and adds more while it keeps getting faster, never above this. It backs off automatically if the server refuses connections. Use 1 to upload one file at a time.",
+        help: "Upper limit, 1 to 10. Shared cPanel hosts usually allow 5 to 8.",
+      }),
+      labeledInput("Exclude Patterns", cfg.exclude.join(", "), (v) => { cfg.exclude = v.split(",").map((p) => p.trim()).filter(Boolean); }, {
+        placeholder: "*.map, *.d.ts",
+        info: "Comma-separated globs, relative to each Build Output Directory. A pattern without / matches at any depth. Excluded files are never uploaded, and in Incremental mode copies FTPilot uploaded earlier are removed from the server.",
+        help: "Files never uploaded. Source maps and type declarations aren't needed to run the site.",
+      }),
     ]),
   ]));
 

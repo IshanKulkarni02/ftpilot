@@ -39,8 +39,16 @@ export interface DeployConfig {
   port: number;
   secure: boolean;
   uploadMode: "incremental" | "full";
+  /** Upper bound for parallel FTP connections; the adaptive controller stays at or below it. */
+  maxConnections?: number;
+  /** Gitignore-style globs (relative to each output folder) that are never uploaded. */
+  exclude?: string[];
   targets: DeployTarget[];
 }
+
+export const DEFAULT_MAX_CONNECTIONS = 8;
+/** Source maps and type declarations aren't needed at runtime and are often 1/3+ of a build's files. */
+export const DEFAULT_EXCLUDE = ["*.map", "*.d.ts"];
 
 export const DEFAULT_CONFIG: DeployConfig = {
   deployBranch: "deploy",
@@ -48,6 +56,8 @@ export const DEFAULT_CONFIG: DeployConfig = {
   port: 21,
   secure: false,
   uploadMode: "incremental",
+  maxConnections: DEFAULT_MAX_CONNECTIONS,
+  exclude: DEFAULT_EXCLUDE,
   targets: [],
 };
 

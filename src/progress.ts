@@ -37,6 +37,16 @@ export interface DeployState {
   lastLine?: string;
   totalOps: number;
   doneOps: number;
+  totalBytes: number;
+  doneBytes: number;
+  /** Parallel upload connections: live, cap, peak reached; files/sec over the last window. */
+  connections: number;
+  maxConnections?: number;
+  peakConnections?: number;
+  rate?: number;
+  retries?: number;
+  events: { t: number; kind: string; message: string }[];
+  cancelled?: boolean;
   error?: { message: string; detail?: string };
   reportPath?: string;
   logPath?: string;

@@ -15,6 +15,13 @@ export function formatMs(ms?: number): string {
   return s < 60 ? `${s}s` : `${Math.floor(s / 60)}m ${s % 60}s`;
 }
 
+function uploadSpeed(s: DeployState): string {
+  const ms = s.targets.reduce((n, t) => n + (t.uploadMs ?? 0), 0);
+  if (!ms || !s.doneOps) return "-";
+  const mb = (s.doneBytes ?? 0) / 1048576;
+  return `${(s.doneOps / (ms / 1000)).toFixed(1)} files/s, ${(mb / (ms / 1000)).toFixed(2)} MB/s`;
+}
+
 function fileList(title: string, files: string[]): string {
   if (!files.length) return "";
   const shown = files.slice(0, MAX_FILES_LISTED);
@@ -96,6 +103,7 @@ export function writeReport(workspaceRoot: string, s: DeployState): string {
   .error { border: 1px solid var(--bad); background: var(--bg-bad); border-radius: 6px; padding: 10px 12px; }
   pre { white-space: pre-wrap; word-break: break-word; font: 11px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace; background: #f6f8fa; border: 1px solid var(--line); border-radius: 6px; padding: 8px 10px; margin: 8px 0 0; }
   ul.files { columns: 2; column-gap: 24px; margin: 0; padding-left: 18px; font: 11px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; }
+  ul.events { margin: 0; padding-left: 18px; font-size: 12px; }
   .hint { margin-top: 32px; } @media print { .hint { display: none; } body { margin: 0; max-width: none; } section.target { break-inside: avoid-page; } }
 </style></head>
 <body>
@@ -112,6 +120,9 @@ export function writeReport(workspaceRoot: string, s: DeployState): string {
     <dt>Branch</dt><dd>${esc(s.branch ?? "(not a git repo)")}${s.commit ? ` @ ${esc(s.commit)}` : ""}</dd>
     <dt>Server</dt><dd>${esc(s.host)}</dd>
     <dt>Strategy</dt><dd>${s.strategy === "full" ? "Full (overwrite remote files)" : "Incremental (changed files only)"}</dd>
+    <dt>Connections</dt><dd>peak ${s.peakConnections ?? 1}${s.maxConnections ? ` (max ${s.maxConnections})` : ""}</dd>
+    <dt>Average speed</dt><dd>${uploadSpeed(s)}</dd>
+    <dt>Retries</dt><dd>${s.retries ?? 0}</dd>
     <dt>Started</dt><dd>${esc(started.toLocaleString())}</dd>
     <dt>Finished</dt><dd>${s.finishedAt ? esc(new Date(s.finishedAt).toLocaleString()) : "-"}</dd>
   </dl>
@@ -121,6 +132,7 @@ export function writeReport(workspaceRoot: string, s: DeployState): string {
     <thead><tr><th>Target</th><th>Status</th><th>Build</th><th class="num">Uploaded</th><th class="num">Removed</th><th class="num">Unchanged</th><th>Upload time</th><th>Restarted</th></tr></thead>
     <tbody>${rows}</tbody>
   </table>
+  ${s.events?.length ? `<h2>Connection events</h2><ul class="events">${s.events.map((e) => `<li><span class="muted">${esc(new Date(e.t).toLocaleTimeString())}</span> ${esc(e.message)}</li>`).join("")}</ul>` : ""}
   ${details ? `<h2>Files</h2>${details}` : ""}
   ${s.logPath ? `<p class="muted">Full log: <a href="${esc(path.basename(s.logPath))}">${esc(path.basename(s.logPath))}</a></p>` : ""}
   <p class="hint muted">To save as PDF: File → Print (Cmd/Ctrl+P) → Save as PDF.</p>

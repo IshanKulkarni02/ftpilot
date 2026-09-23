@@ -1,12 +1,13 @@
 import * as vscode from "vscode";
 import * as fs from "fs";
 import * as path from "path";
-import { loadConfig, manifestPath, updateTargetLocalDir, DeployTarget } from "./config";
+import { loadConfig, manifestPath, updateTargetLocalDir, DeployTarget, DEFAULT_MAX_CONNECTIONS, DEFAULT_EXCLUDE } from "./config";
 import { getCredentials } from "./secrets";
 import { getCurrentBranch, checkoutBranch, getShortCommit } from "./git";
 import { runBuild, validateEnvSecrets, BuildError, LogSink } from "./build";
-import { loadManifest, saveManifest, hashTarget, diffTarget, walkDir, Manifest } from "./manifest";
+import { loadManifest, saveManifest, hashTarget, diffTarget, walkDir, globMatcher, Manifest } from "./manifest";
 import { DeployState, DeployTracker } from "./progress";
+import { AdaptivePool, CancelledError, Job } from "./parallel";
 import { writeReport, writeLog, formatMs } from "./report";
 import { snapshotTopLevelDirs, diffTopLevelDirs } from "./detect";
 import * as ftpClient from "./ftpClient";
@@ -22,6 +23,24 @@ export interface DeployOptions {
 
 /** One deploy at a time: two concurrent runs would race on the manifest and the FTP server. */
 let running = false;
+let cancelRequested = false;
+/** Kills the in-flight build process, if any. */
+let killBuild: (() => void) | undefined;
+
+/** Stops the running deploy at the next safe point (after in-flight files; kills an active build). */
+export function cancelDeploy(): void {
+  if (!running) return;
+  cancelRequested = true;
+  killBuild?.();
+}
+
+function fileSize(p: string): number {
+  try {
+    return fs.statSync(p).size;
+  } catch {
+    return 0;
+  }
+}
 
 export interface DeployResult {
   ok: boolean;
@@ -45,6 +64,7 @@ export async function runDeploy(
     return { ok: false, message: "Already running." };
   }
   running = true;
+  cancelRequested = false;
   try {
     return await runDeployInner(context, output, statusBar, options, workspaceRoot);
   } finally {
@@ -123,6 +143,10 @@ async function runDeployInner(
       })),
       totalOps: 0,
       doneOps: 0,
+      totalBytes: 0,
+      doneBytes: 0,
+      connections: 0,
+      events: [],
     },
     options.onProgress
   );
@@ -139,8 +163,8 @@ async function runDeployInner(
   log.appendLine(`FTPilot ${kind} — ${new Date(s.startedAt).toLocaleString()} — ${s.project} @ ${s.branch ?? "?"}${s.commit ? ` (${s.commit})` : ""}`);
 
   return vscode.window.withProgress(
-    { location: vscode.ProgressLocation.Notification, title: "FTPilot" },
-    async (vsProgress) => {
+    { location: vscode.ProgressLocation.Notification, title: "FTPilot", cancellable: true },
+    async (vsProgress, token) => {
       let lastPct = 0;
       const say = (message: string) => {
         const pct = s.totalOps ? Math.floor((s.doneOps / s.totalOps) * 100) : 0;
@@ -149,8 +173,11 @@ async function runDeployInner(
         statusBar.text = `$(sync~spin) FTPilot: ${message}`;
       };
 
-      let client: Awaited<ReturnType<typeof ftpClient.connect>> | undefined;
-      let currentAccount = "";
+      // One adaptive pool per FTP account, reused across that account's targets.
+      const pools = new Map<string, { pool: AdaptivePool; key: string }>();
+      const maxConnections = Math.max(1, Math.min(10, config.maxConnections ?? DEFAULT_MAX_CONNECTIONS));
+      const exclude = globMatcher(config.exclude ?? DEFAULT_EXCLUDE);
+      token.onCancellationRequested(() => { cancelRequested = true; });
 
       try {
         // 1. Fail fast on any missing secret env var before building anything.
@@ -161,6 +188,7 @@ async function runDeployInner(
         // whichever folder the build just created/touched and persist the fix.
         tracker.update((st) => { st.phase = "building"; });
         for (const target of config.targets) {
+          if (cancelRequested) throw new CancelledError();
           const tp = tracker.target(target.name)!;
           tracker.update((st) => { st.currentTarget = target.name; st.lastLine = undefined; tp.status = "building"; });
           say(`Building ${target.name}…`);
@@ -169,7 +197,9 @@ async function runDeployInner(
           const before = target.buildCommand ? snapshotTopLevelDirs(buildCwd) : undefined;
           const t0 = Date.now();
 
-          await runBuild(context, target, workspaceRoot, log, (line) => tracker.update((st) => { st.lastLine = line; }));
+          await runBuild(context, target, workspaceRoot, log, (line) => tracker.update((st) => { st.lastLine = line; }), (kill) => { killBuild = kill; });
+          killBuild = undefined;
+          if (cancelRequested) throw new CancelledError();
 
           const localDir = path.join(workspaceRoot, target.localDir);
           if (target.buildCommand && !fs.existsSync(localDir)) {
@@ -197,13 +227,15 @@ async function runDeployInner(
         say("Comparing files…");
         const newManifest: Manifest = {};
         for (const target of config.targets) {
-          Object.assign(newManifest, hashTarget(target.name, path.join(workspaceRoot, target.localDir)));
+          Object.assign(newManifest, hashTarget(target.name, path.join(workspaceRoot, target.localDir), exclude));
         }
         const mPath = manifestPath(workspaceRoot);
         const oldManifest = options.forceFull ? {} : loadManifest(mPath);
+        let excludedCount = 0;
         const plans = config.targets.map((target) => {
           const localDir = path.join(workspaceRoot, target.localDir);
-          const all = walkDir(localDir);
+          const all = walkDir(localDir, exclude);
+          excludedCount += walkDir(localDir).length - all.length;
           const diff = useFull ? { toUpload: all, toRemove: [] as string[] } : diffTarget(target.name, oldManifest, newManifest);
           const tp = tracker.target(target.name)!;
           tp.toUpload = diff.toUpload.length;
@@ -211,11 +243,19 @@ async function runDeployInner(
           tp.unchanged = all.length - diff.toUpload.length;
           return { target, localDir, tp, ...diff };
         });
-        tracker.update((st) => { st.totalOps = plans.reduce((n, p) => n + p.toUpload.length + p.toRemove.length, 0); });
+        if (excludedCount) log.appendLine(`Skipping ${excludedCount} file(s) matching exclude patterns: ${(config.exclude ?? DEFAULT_EXCLUDE).join(", ")}`);
+        tracker.update((st) => {
+          st.totalOps = plans.reduce((n, p) => n + p.toUpload.length + p.toRemove.length, 0);
+          st.totalBytes = plans.reduce((n, p) => n + p.toUpload.reduce((b, rel) => b + fileSize(path.join(p.localDir, rel)), 0), 0);
+          st.maxConnections = maxConnections;
+        });
 
-        // 4. Upload (connecting/reconnecting per FTP account as needed)
+        // 4. Upload over an adaptive pool of connections: folders first (so parallel
+        // connections never race to create one), then assets, then HTML last so pages only
+        // ever reference assets that are already on the server, then deletions.
         tracker.update((st) => { st.phase = "uploading"; });
         for (const { target, localDir, tp, toUpload, toRemove } of plans) {
+          if (cancelRequested) throw new CancelledError();
           const account = target.ftpUser ?? "default";
           const creds = await getCredentials(context, workspaceRoot, account);
           if (!creds) {
@@ -227,38 +267,95 @@ async function runDeployInner(
           }
           tracker.update((st) => { st.currentTarget = target.name; st.currentFile = undefined; tp.status = "uploading"; });
 
-          if (!client || account !== currentAccount) {
-            client?.close();
+          let entry = pools.get(account);
+          if (!entry) {
+            const key = `ftpilot.connections:${config.host}:${config.port}:${creds.user}`;
+            const learned = context.globalState.get<{ start: number; ceiling?: number }>(key);
+            const pool = new AdaptivePool({
+              connect: () => ftpClient.connect(config, creds),
+              start: learned?.start ?? 2,
+              max: maxConnections,
+              ceiling: learned?.ceiling,
+              isCancelled: () => cancelRequested,
+              onEvent: (e) => {
+                log.appendLine(`[connections] ${e.message}`);
+                tracker.update((st) => { st.events.push(e); if (st.events.length > 200) st.events.shift(); });
+              },
+            });
+            entry = { pool, key };
+            pools.set(account, entry);
             say(`Connecting to ${config.host}…`);
-            log.appendLine(`\nConnecting to ${config.host}:${config.port} as ${creds.user}...`);
-            client = await ftpClient.connect(config, creds);
-            currentAccount = account;
+            log.appendLine(`\nConnecting to ${config.host}:${config.port} as ${creds.user} (start ${learned?.start ?? 2}, max ${maxConnections} connections)...`);
           }
+          const { pool } = entry;
+          const syncPool = () => tracker.update((st) => {
+            const ps = pool.stats();
+            st.connections = ps.active;
+            st.peakConnections = Math.max(st.peakConnections ?? 0, ps.peak);
+            st.rate = ps.rate;
+            st.retries = ps.retries;
+          });
+          const poolTimer = setInterval(syncPool, 1000);
 
           log.appendLine(`\n=== Uploading: ${target.name} -> ${target.remoteDir} (${useFull ? "full" : "incremental"}) ===`);
           const t0 = Date.now();
-          if (!toUpload.length && !toRemove.length) say(`${target.name}: nothing changed`);
-          await ftpClient.uploadFiles(client, localDir, target.remoteDir, toUpload, (relPath) => {
-            log.appendLine(`  + ${relPath}`);
-            tracker.update((st) => { tp.uploaded++; tp.uploadedFiles.push(relPath); st.doneOps++; st.currentFile = relPath; });
-            say(`Uploading ${target.name}: ${tp.uploaded} / ${tp.toUpload}`);
-          });
-          for (const relPath of toRemove) {
-            log.appendLine(`  - ${relPath}`);
-            await ftpClient.removeOne(client, target.remoteDir, relPath);
-            tracker.update((st) => { tp.removed++; tp.removedFiles.push(relPath); st.doneOps++; st.currentFile = relPath; });
-            say(`Cleaning up ${target.name}: ${tp.removed} / ${tp.toRemove}`);
-          }
-          log.appendLine(`Uploaded ${tp.uploaded}, removed ${tp.removed}, unchanged ${tp.unchanged}.`);
+          try {
+            if (!toUpload.length && !toRemove.length) say(`${target.name}: nothing changed`);
 
-          const targetChanged = useFull || toUpload.length > 0 || toRemove.length > 0;
-          if (target.restartFile && targetChanged) {
-            say(`Restarting ${target.name}…`);
-            log.appendLine(`Restarting app: touching ${target.restartFile}`);
-            await ftpClient.touchRestartFile(client, target.restartFile);
-            tp.restarted = true;
+            const dirs = [...new Set(toUpload.map((rel) => path.posix.dirname(ftpClient.remoteJoin(target.remoteDir, rel))))].sort();
+            if (dirs.length) {
+              say(`Preparing ${dirs.length} folder(s) on the server…`);
+              await pool.withClient((c) => ftpClient.ensureDirs(c, dirs));
+            }
+
+            const uploadJob = (rel: string): Job => {
+              const bytes = fileSize(path.join(localDir, rel));
+              return {
+                label: rel,
+                bytes,
+                attempts: 0,
+                run: async (c) => {
+                  await c.uploadFrom(path.join(localDir, rel), ftpClient.remoteJoin(target.remoteDir, rel));
+                  log.appendLine(`  + ${rel}`);
+                  tracker.update((st) => { tp.uploaded++; tp.uploadedFiles.push(rel); st.doneOps++; st.doneBytes = (st.doneBytes ?? 0) + bytes; st.currentFile = rel; });
+                  say(`Uploading ${target.name}: ${tp.uploaded} / ${tp.toUpload}`);
+                },
+              };
+            };
+            const isHtml = (rel: string) => /\.html?$/i.test(rel);
+            await pool.run(toUpload.filter((r) => !isHtml(r)).map(uploadJob));
+            await pool.run(toUpload.filter(isHtml).map(uploadJob));
+            await pool.run(toRemove.map((rel): Job => ({
+              label: rel,
+              bytes: 0,
+              attempts: 0,
+              run: async (c) => {
+                await ftpClient.removeOne(c, target.remoteDir, rel);
+                log.appendLine(`  - ${rel}`);
+                tracker.update((st) => { tp.removed++; tp.removedFiles.push(rel); st.doneOps++; st.currentFile = rel; });
+                say(`Cleaning up ${target.name}: ${tp.removed} / ${tp.toRemove}`);
+              },
+            })));
+            log.appendLine(`Uploaded ${tp.uploaded}, removed ${tp.removed}, unchanged ${tp.unchanged}.`);
+
+            const targetChanged = useFull || toUpload.length > 0 || toRemove.length > 0;
+            if (target.restartFile && targetChanged) {
+              say(`Restarting ${target.name}…`);
+              log.appendLine(`Restarting app: touching ${target.restartFile}`);
+              await pool.withClient((c) => ftpClient.touchRestartFile(c, target.restartFile!));
+              tp.restarted = true;
+            }
+          } finally {
+            clearInterval(poolTimer);
+            syncPool();
           }
           tracker.update(() => { tp.uploadMs = Date.now() - t0; tp.status = "done"; });
+        }
+
+        // Remember what worked so the next deploy starts at full speed.
+        for (const { pool, key } of pools.values()) {
+          const ps = pool.stats();
+          await context.globalState.update(key, { start: pool.learnedStart(), ceiling: ps.ceiling });
         }
 
         // A single-target deploy must keep the other targets' manifest entries, or their
@@ -282,6 +379,7 @@ async function runDeployInner(
         });
         return { ok: true, message };
       } catch (err) {
+        const cancelled = err instanceof CancelledError;
         const message = (err as Error).message;
         const detail = err instanceof BuildError ? err.detail : undefined;
         log.appendLine(`\nERROR: ${message}`);
@@ -291,17 +389,20 @@ async function runDeployInner(
           st.phase = "failed";
           st.finishedAt = Date.now();
           st.error = { message, detail };
+          st.cancelled = cancelled;
           const current = st.targets.find((t) => t.name === st.currentTarget && t.status !== "done");
           if (current) current.status = "failed";
         });
         finish(workspaceRoot, tracker, logLines);
-        void vscode.window.showErrorMessage(`FTPilot failed: ${message}`, "Open Report", "Show Output").then((c) => {
+        const show = cancelled ? vscode.window.showWarningMessage : vscode.window.showErrorMessage;
+        void show(cancelled ? "FTPilot: deploy cancelled. Files already uploaded stay; the next deploy re-sends anything unconfirmed." : `FTPilot failed: ${message}`, "Open Report", "Show Output").then((c) => {
           if (c === "Open Report") void vscode.env.openExternal(vscode.Uri.file(s.reportPath!));
           if (c === "Show Output") output.show(true);
         });
         return { ok: false, message };
       } finally {
-        client?.close();
+        for (const { pool } of pools.values()) pool.close();
+        killBuild = undefined;
         statusBar.text = "$(cloud-upload) Deploy";
       }
     }

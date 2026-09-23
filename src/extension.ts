@@ -1,5 +1,5 @@
 import * as vscode from "vscode";
-import { runDeploy } from "./deploy";
+import { runDeploy, cancelDeploy } from "./deploy";
 import { DeployState } from "./progress";
 import { runBackup } from "./backup";
 import { setCredentials } from "./secrets";
@@ -33,6 +33,7 @@ export function activate(context: vscode.ExtensionContext): void {
     }),
     vscode.commands.registerCommand("ftpilot.openInEditor", () => panel.openInEditor()),
     vscode.commands.registerCommand("ftpilot.showOutput", () => output.show(true)),
+    vscode.commands.registerCommand("ftpilot.cancelDeploy", () => cancelDeploy()),
     vscode.commands.registerCommand("ftpilot.openHelp", () =>
       vscode.commands.executeCommand("markdown.showPreview", vscode.Uri.joinPath(context.extensionUri, "media", "HELP.md"))
     )

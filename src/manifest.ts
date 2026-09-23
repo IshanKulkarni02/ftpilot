@@ -24,8 +24,30 @@ function hashFile(filePath: string): string {
   return crypto.createHash("sha1").update(buf).digest("hex");
 }
 
+/**
+ * Compiles gitignore-style globs into one predicate over posix relative paths.
+ * `*` = within a path segment, `**` = any depth, `?` = one char; a pattern without "/"
+ * matches the file name at any depth (so "*.map" == "**\/*.map").
+ */
+export function globMatcher(patterns: string[] = []): (relPath: string) => boolean {
+  const res = patterns
+    .map((p) => p.trim())
+    .filter(Boolean)
+    .map((p) => {
+      const anchored = p.includes("/") ? p.replace(/^\//, "") : `**/${p}`;
+      const src = anchored
+        .split(/(\*\*\/|\*\*|\*|\?)/)
+        .map((tok) =>
+          tok === "**/" ? "(?:.*/)?" : tok === "**" ? ".*" : tok === "*" ? "[^/]*" : tok === "?" ? "[^/]" : tok.replace(/[.+^${}()|[\]\\]/g, "\\$&")
+        )
+        .join("");
+      return new RegExp(`^${src}$`);
+    });
+  return (relPath) => res.some((re) => re.test(relPath));
+}
+
 /** Recursively lists files under `dir`, returned as paths relative to `dir` (posix separators). */
-export function walkDir(dir: string): string[] {
+export function walkDir(dir: string, exclude?: (relPath: string) => boolean): string[] {
   const results: string[] = [];
   function walk(current: string, rel: string) {
     const entries = fs.readdirSync(current, { withFileTypes: true });
@@ -37,7 +59,7 @@ export function walkDir(dir: string): string[] {
       const relPath = rel ? `${rel}/${entry.name}` : entry.name;
       if (entry.isDirectory()) {
         walk(abs, relPath);
-      } else if (entry.isFile()) {
+      } else if (entry.isFile() && !exclude?.(relPath)) {
         results.push(relPath);
       }
     }
@@ -49,9 +71,9 @@ export function walkDir(dir: string): string[] {
 }
 
 /** Builds a manifest subset for one target by hashing every file under its local build dir. */
-export function hashTarget(targetName: string, localDir: string): Manifest {
+export function hashTarget(targetName: string, localDir: string, exclude?: (relPath: string) => boolean): Manifest {
   const manifest: Manifest = {};
-  for (const relPath of walkDir(localDir)) {
+  for (const relPath of walkDir(localDir, exclude)) {
     const key = `${targetName}/${relPath}`;
     manifest[key] = hashFile(path.join(localDir, relPath));
   }
