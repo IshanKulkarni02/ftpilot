@@ -14,25 +14,87 @@
     "commands": [
       {
         "command": "ftpilot.setup",
-        "title": "FTPilot: Configure Project"
+        "title": "FTPilot: Configure Project",
+        "icon": "$(gear)"
       },
       {
         "command": "ftpilot.deploy",
-        "title": "FTPilot: Deploy / Redeploy"
+        "title": "FTPilot: Deploy / Redeploy",
+        "icon": "$(cloud-upload)"
       },
       {
         "command": "ftpilot.fullRedeploy",
-        "title": "FTPilot: Force Full Re-upload"
+        "title": "FTPilot: Force Full Re-upload",
+        "icon": "$(sync)"
       },
       {
         "command": "ftpilot.setCredentials",
-        "title": "FTPilot: Set FTP Credentials"
+        "title": "FTPilot: Set FTP Credentials",
+        "icon": "$(key)"
       },
       {
         "command": "ftpilot.editConfig",
-        "title": "FTPilot: Edit Config File"
+        "title": "FTPilot: Edit Config File",
+        "icon": "$(json)"
+      },
+      {
+        "command": "ftpilot.refreshTree",
+        "title": "FTPilot: Refresh",
+        "icon": "$(refresh)"
       }
-    ]
+    ],
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "ftpilot",
+          "title": "FTPilot",
+          "icon": "media/activitybar-icon.svg"
+        }
+      ]
+    },
+    "views": {
+      "ftpilot": [
+        {
+          "id": "ftpilotTargets",
+          "name": "Deploy Targets"
+        }
+      ]
+    },
+    "viewsWelcome": [
+      {
+        "view": "ftpilotTargets",
+        "contents": "No FTPilot config found in this project.\n[Configure Project](command:ftpilot.setup)"
+      }
+    ],
+    "menus": {
+      "view/title": [
+        {
+          "command": "ftpilot.deploy",
+          "when": "view == ftpilotTargets",
+          "group": "navigation@1"
+        },
+        {
+          "command": "ftpilot.fullRedeploy",
+          "when": "view == ftpilotTargets",
+          "group": "navigation@2"
+        },
+        {
+          "command": "ftpilot.setCredentials",
+          "when": "view == ftpilotTargets",
+          "group": "navigation@3"
+        },
+        {
+          "command": "ftpilot.editConfig",
+          "when": "view == ftpilotTargets",
+          "group": "navigation@4"
+        },
+        {
+          "command": "ftpilot.setup",
+          "when": "view == ftpilotTargets",
+          "group": "navigation@5"
+        }
+      ]
+    }
   },
   "scripts": {
     "compile": "tsc -p ./",

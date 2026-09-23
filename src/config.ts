@@ -75,3 +75,17 @@ export function saveConfig(workspaceRoot: string, config: DeployConfig): void {
   fs.mkdirSync(configDir(workspaceRoot), { recursive: true });
   fs.writeFileSync(configPath(workspaceRoot), JSON.stringify(config, null, 2), "utf8");
 }
+
+/** Persists a corrected localDir for one target by name, e.g. after runtime output-folder auto-detection. */
+export function updateTargetLocalDir(
+  workspaceRoot: string,
+  targetName: string,
+  newLocalDir: string
+): void {
+  const config = loadConfig(workspaceRoot);
+  const target = config.targets.find((t) => t.name === targetName);
+  if (target) {
+    target.localDir = newLocalDir;
+    saveConfig(workspaceRoot, config);
+  }
+}

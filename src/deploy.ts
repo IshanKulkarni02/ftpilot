@@ -1,10 +1,12 @@
 import * as vscode from "vscode";
+import * as fs from "fs";
 import * as path from "path";
-import { loadConfig, manifestPath, DeployTarget } from "./config";
+import { loadConfig, manifestPath, updateTargetLocalDir, DeployTarget } from "./config";
 import { getCredentials } from "./secrets";
 import { getCurrentBranch } from "./git";
 import { runBuild } from "./build";
 import { loadManifest, saveManifest, hashTarget, diffTarget, Manifest } from "./manifest";
+import { snapshotTopLevelDirs, diffTopLevelDirs } from "./detect";
 import * as ftpClient from "./ftpClient";
 
 export interface DeployOptions {
@@ -66,10 +68,32 @@ export async function runDeploy(
   let currentAccount = "";
 
   try {
-    // 1. Build each target
+    // 1. Build each target. If the configured output folder doesn't exist afterwards
+    // (wrong/never-detected localDir), fall back to detecting which folder the build
+    // actually just created/touched, use that, and persist the fix to config.json.
     for (const target of config.targets) {
       output.appendLine(`\n=== Building: ${target.name} ===`);
+      const buildCwd = target.cwd ? path.join(workspaceRoot, target.cwd) : workspaceRoot;
+      const before = target.buildCommand ? snapshotTopLevelDirs(buildCwd) : undefined;
+
       await runBuild(target, workspaceRoot, output);
+
+      const localDir = path.join(workspaceRoot, target.localDir);
+      if (target.buildCommand && !fs.existsSync(localDir)) {
+        const after = snapshotTopLevelDirs(buildCwd);
+        const [guess] = diffTopLevelDirs(before ?? {}, after);
+        if (!guess) {
+          throw new Error(
+            `[${target.name}] build finished but output folder '${target.localDir}' doesn't exist, and no changed folder could be detected in '${target.cwd ?? "."}'.`
+          );
+        }
+        const correctedLocalDir = target.cwd ? `${target.cwd}/${guess}` : guess;
+        output.appendLine(
+          `[${target.name}] configured output folder '${target.localDir}' not found — detected '${guess}' was created by the build instead. Using it and updating .ftbdeploy/config.json.`
+        );
+        target.localDir = correctedLocalDir;
+        updateTargetLocalDir(workspaceRoot, target.name, correctedLocalDir);
+      }
     }
 
     // 2. Hash all targets' build output into one combined manifest

@@ -3,9 +3,11 @@ import { runSetupWizard } from "./setupWizard";
 import { runDeploy } from "./deploy";
 import { setCredentials } from "./secrets";
 import { configPath, configExists } from "./config";
+import { FtpilotTreeProvider } from "./sidebar";
 
 let output: vscode.OutputChannel;
 let statusBar: vscode.StatusBarItem;
+let tree: FtpilotTreeProvider;
 
 function getWorkspaceRoot(): string | undefined {
   return vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
@@ -20,6 +22,17 @@ export function activate(context: vscode.ExtensionContext): void {
   statusBar.show();
   context.subscriptions.push(output, statusBar);
 
+  tree = new FtpilotTreeProvider();
+  const treeView = vscode.window.createTreeView("ftpilotTargets", { treeDataProvider: tree });
+  context.subscriptions.push(treeView);
+
+  const watcher = vscode.workspace.createFileSystemWatcher("**/.ftbdeploy/config.json");
+  watcher.onDidChange(() => tree.refresh());
+  watcher.onDidCreate(() => tree.refresh());
+  watcher.onDidDelete(() => tree.refresh());
+  context.subscriptions.push(watcher);
+  context.subscriptions.push(vscode.workspace.onDidChangeWorkspaceFolders(() => tree.refresh()));
+
   context.subscriptions.push(
     vscode.commands.registerCommand("ftpilot.setup", async () => {
       const root = getWorkspaceRoot();
@@ -28,6 +41,7 @@ export function activate(context: vscode.ExtensionContext): void {
         return;
       }
       await runSetupWizard(context, root);
+      tree.refresh();
     }),
 
     vscode.commands.registerCommand("ftpilot.deploy", async () => {
@@ -39,14 +53,17 @@ export function activate(context: vscode.ExtensionContext): void {
         );
         if (choice === "Configure Now") {
           await runSetupWizard(context, root);
+          tree.refresh();
         }
         return;
       }
       await runDeploy(context, output, statusBar);
+      tree.refresh();
     }),
 
     vscode.commands.registerCommand("ftpilot.fullRedeploy", async () => {
       await runDeploy(context, output, statusBar, { forceFull: true });
+      tree.refresh();
     }),
 
     vscode.commands.registerCommand("ftpilot.setCredentials", async () => {
@@ -82,7 +99,9 @@ export function activate(context: vscode.ExtensionContext): void {
       }
       const doc = await vscode.workspace.openTextDocument(configPath(root));
       await vscode.window.showTextDocument(doc);
-    })
+    }),
+
+    vscode.commands.registerCommand("ftpilot.refreshTree", () => tree.refresh())
   );
 }
 
