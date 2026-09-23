@@ -1,5 +1,6 @@
 import * as vscode from "vscode";
-import { runDeploy, cancelDeploy } from "./deploy";
+import { runDeploy, cancelDeploy, runRollback } from "./deploy";
+import { listSnapshots } from "./rollback";
 import { DeployState } from "./progress";
 import { runBackup } from "./backup";
 import { setCredentials } from "./secrets";
@@ -34,6 +35,40 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.commands.registerCommand("ftpilot.openInEditor", () => panel.openInEditor()),
     vscode.commands.registerCommand("ftpilot.showOutput", () => output.show(true)),
     vscode.commands.registerCommand("ftpilot.cancelDeploy", () => cancelDeploy()),
+    // From the panel (already confirmed there) or the Command Palette (pick + confirm here).
+    vscode.commands.registerCommand("ftpilot.rollback", async (args?: { snapshotId?: string; confirmed?: boolean }) => {
+      const root = getWorkspaceRoot();
+      if (!root) return;
+      let id = args?.snapshotId;
+      if (!id) {
+        const usable = listSnapshots(root).filter((i) => i.complete && !i.rolledBackAt);
+        if (!usable.length) {
+          void vscode.window.showInformationMessage("FTPilot: no deploy to roll back. Rollback copies are saved before each deploy (last 3 kept).");
+          return;
+        }
+        const pick = await vscode.window.showQuickPick(
+          usable.map((i) => ({
+            label: new Date(i.createdAt).toLocaleString(),
+            description: `${i.branch ?? ""}${i.commit ? ` @ ${i.commit}` : ""}`,
+            detail: i.targets.map((t) => `${t.name}: ${t.restore.length} to restore, ${t.created.length} to delete`).join(" · "),
+            id: i.id,
+          })),
+          { placeHolder: "Roll back which deploy? (newest first)" }
+        );
+        if (!pick) return;
+        id = pick.id;
+      }
+      if (!args?.confirmed) {
+        const ok = await vscode.window.showWarningMessage(
+          "Roll back this deploy? The server files it overwrote or deleted are put back, files it created are deleted, and Node apps are restarted.",
+          { modal: true },
+          "Roll Back"
+        );
+        if (ok !== "Roll Back") return;
+      }
+      await runRollback(context, output, statusBar, { snapshotId: id, onProgress });
+      panel.refresh();
+    }),
     vscode.commands.registerCommand("ftpilot.preview", async (args?: { targetId?: string; compareRemote?: boolean; skipBuild?: boolean }) => {
       await runDeploy(context, output, statusBar, { dryRun: true, onlyTargetId: args?.targetId, compareRemote: args?.compareRemote, skipBuild: args?.skipBuild, onProgress });
       panel.refresh();

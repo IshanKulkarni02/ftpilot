@@ -47,6 +47,8 @@ export interface DeployConfig {
   uploadMode: "incremental" | "full";
   /** Upper bound for parallel FTP connections; the adaptive controller stays at or below it. */
   maxConnections?: number;
+  /** Save the server's current copy of files a deploy overwrites/deletes, enabling one-click rollback (default on). */
+  rollbackSnapshots?: boolean;
   /** Gitignore-style globs (relative to each output folder) that are never uploaded. */
   exclude?: string[];
   targets: DeployTarget[];

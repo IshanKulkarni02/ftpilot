@@ -65,7 +65,8 @@ export function writeReport(workspaceRoot: string, s: DeployState): string {
     (a, t) => ({ up: a.up + t.uploaded, rm: a.rm + t.removed, same: a.same + t.unchanged }),
     { up: 0, rm: 0, same: 0 }
   );
-  const kindLabel = preview
+  const rbRun = s.kind === "rollback";
+  const kindLabel = rbRun ? "Rollback" : preview
     ? `Preview (nothing uploaded)${s.compareRemote ? ", compared with server" : ""}`
     : s.kind === "full" ? "Full re-upload" : s.kind === "target" ? "Single target" : "Deploy all targets";
   const pendingBytes = s.totalBytes ?? 0;
@@ -126,7 +127,7 @@ export function writeReport(workspaceRoot: string, s: DeployState): string {
   .hint { margin-top: 32px; } @media print { .hint { display: none; } body { margin: 0; max-width: none; } section.target { break-inside: avoid-page; } }
 </style></head>
 <body>
-  <h1>FTPilot ${preview ? "deploy preview" : "deploy report"} <span class="badge ${ok && !s.healthFailed ? "ok" : "bad"}">${preview && ok ? "Preview" : ok && s.healthFailed ? "Deployed, health check failed" : ok ? "Succeeded" : s.cancelled ? "Cancelled" : "Failed"}</span></h1>
+  <h1>FTPilot ${rbRun ? "rollback report" : preview ? "deploy preview" : "deploy report"} <span class="badge ${ok && !s.healthFailed ? "ok" : "bad"}">${preview && ok ? "Preview" : ok && s.healthFailed ? "Deployed, health check failed" : ok ? "Succeeded" : s.cancelled ? "Cancelled" : "Failed"}</span></h1>
   <div class="muted">${esc(s.project)} · ${esc(started.toLocaleString())}</div>
   ${preview ? `<div class="stats">
     <div>${s.targets.reduce((n, t) => n + t.toUpload, 0)}<span>to upload</span></div>
@@ -148,6 +149,8 @@ export function writeReport(workspaceRoot: string, s: DeployState): string {
     <dt>Connections</dt><dd>peak ${s.peakConnections ?? 1}${s.maxConnections ? ` (max ${s.maxConnections})` : ""}</dd>
     <dt>Average speed</dt><dd>${uploadSpeed(s)}</dd>
     <dt>Retries</dt><dd>${s.retries ?? 0}</dd>
+    ${s.rollbackId ? `<dt>Rollback copy</dt><dd>saved (${esc(s.rollbackId)}); use Roll Back in FTPilot to undo this deploy</dd>` : ""}
+    ${rbRun ? `<dt>Undid deploy</dt><dd>${esc(s.rollbackOf ?? "")}</dd>` : ""}
     <dt>Started</dt><dd>${esc(started.toLocaleString())}</dd>
     <dt>Finished</dt><dd>${s.finishedAt ? esc(new Date(s.finishedAt).toLocaleString()) : "-"}</dd>
   </dl>

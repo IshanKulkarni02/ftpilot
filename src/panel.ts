@@ -30,6 +30,7 @@ type InMsg =
   | { type: "cancelDeploy" }
   | { type: "preview"; targetId?: string; compareRemote?: boolean; skipBuild?: boolean }
   | { type: "deployFromPreview" }
+  | { type: "rollback"; id: string }
   | { type: "testHealth"; index: number; url: string; expect?: string }
   | { type: "testFtps"; config: DeployConfig }
   | {
@@ -388,6 +389,11 @@ export class FtpilotPanel implements vscode.WebviewViewProvider {
         reply({ type: "healthResult", index: msg.index, result });
         return;
       }
+
+      case "rollback":
+        await vscode.commands.executeCommand("ftpilot.rollback", { snapshotId: msg.id, confirmed: true });
+        this.postInit();
+        return;
 
       case "deployFromPreview":
         await vscode.commands.executeCommand("ftpilot.deployPreview", { targetId: this.progress?.onlyTargetId });
@@ -820,6 +826,7 @@ let lastStatus = null;
 let conn = { state: "idle", text: "Disconnected" };
 let view = "form";      // "form" | "confirmSave" | "confirmDeploy" | "confirmFull" | "confirmBackup" | "confirmDeployTarget"
 let pendingTarget = null;
+let pendingRollback = null;
 let customFields = {};
 let advancedOpen = {};
 let dirsCache = {};
@@ -1120,6 +1127,7 @@ function stripConfig(c) {
     deployBranch: c.deployBranch, host: c.host, port: c.port, secure: c.secure, uploadMode: c.uploadMode,
     ...(c.secure && c.allowInvalidCert ? { allowInvalidCert: true } : {}),
     maxConnections: c.maxConnections || 8,
+    ...(c.rollbackSnapshots === false ? { rollbackSnapshots: false } : {}),
     exclude: (c.exclude || []).map((p) => p.trim()).filter(Boolean),
     targets,
   };
@@ -1169,7 +1177,7 @@ function fmtMs(ms) {
   return s < 60 ? s + "s" : Math.floor(s / 60) + "m " + (s % 60) + "s";
 }
 
-const PHASE_TITLE = { preparing: "Preparing", building: "Building", comparing: "Comparing files", uploading: "Uploading", checking: "Health check" };
+const PHASE_TITLE = { preparing: "Preparing", building: "Building", comparing: "Comparing files", snapshot: "Saving rollback copy", uploading: "Uploading", checking: "Health check" };
 const TARGET_ICON = { pending: "circle-outline", building: "loading codicon-modifier-spin", built: "check", uploading: "loading codicon-modifier-spin", done: "pass-filled", failed: "error" };
 
 function targetProgressText(t) {
@@ -1190,7 +1198,10 @@ function progressCard() {
   const ok = p.phase === "done";
   if (running && p.phase === "checking" && !p.currentTarget) p.currentTarget = "";
   if (!running && ok && p.dryRun) return previewCard(p);
-  const title = running ? (p.dryRun && p.phase !== "building" ? "Previewing" : PHASE_TITLE[p.phase] || "Working") : ok && p.healthFailed ? "Deployed, health check failed" : ok ? "Deploy succeeded" : p.cancelled ? (p.dryRun ? "Preview cancelled" : "Deploy cancelled") : p.dryRun ? "Preview failed" : "Deploy failed";
+  const rb = p.kind === "rollback";
+  const title = rb
+    ? (running ? "Rolling back" : ok && p.healthFailed ? "Rolled back, health check failed" : ok ? "Rollback complete" : p.cancelled ? "Rollback cancelled" : "Rollback failed")
+    : running ? (p.dryRun && p.phase !== "building" ? "Previewing" : PHASE_TITLE[p.phase] || "Working") : ok && p.healthFailed ? "Deployed, health check failed" : ok ? "Deploy succeeded" : p.cancelled ? (p.dryRun ? "Preview cancelled" : "Deploy cancelled") : p.dryRun ? "Preview failed" : "Deploy failed";
   const head = el("div", { class: "pc-head" }, [
     ic(running ? "loading codicon-modifier-spin" : ok && !p.healthFailed ? "pass-filled" : ok ? "warning" : "error"),
     el("strong", {}, [title]),
@@ -1205,6 +1216,11 @@ function progressCard() {
   } else if (running && p.phase === "comparing") {
     now = el("div", { class: "pc-now" }, [el("span", {}, ["Checking which files changed"])]);
   }
+  // Snapshot runs before upload with its own counter, so the upload bar stays meaningful.
+  const snap = running && p.phase === "snapshot" && p.snapTotal ? el("div", {}, [
+    el("div", { class: "pc-bar" }, [el("div", { style: "width:" + Math.floor(((p.snapDone || 0) / p.snapTotal) * 100) + "%" }, [])]),
+    el("div", { class: "pc-count muted" }, ["Saving rollback copy: " + (p.snapDone || 0) + " / " + p.snapTotal, el("span", {}, [Math.floor(((p.snapDone || 0) / p.snapTotal) * 100) + "%"])]),
+  ]) : null;
 
   let bar = null;
   if (p.totalOps > 0) {
@@ -1239,6 +1255,11 @@ function progressCard() {
     p.error.detail ? el("pre", {}, [p.error.detail]) : null,
   ]) : null;
 
+  // Offered after success, a failed health check, or a failure mid-upload (partial deploy).
+  const canRollBack = !running && !rb && !p.dryRun && p.rollbackId && !(p.cancelled && !p.doneOps) && !(p.phase === "failed" && !p.doneOps);
+  const rollbackBtn = canRollBack ? el("div", { class: "pc-actions" }, [
+    el("button", { class: p.healthFailed || p.phase === "failed" ? "block" : "secondary block", onclick: () => { pendingRollback = p.rollbackId; view = "confirmRollback"; render(); } }, [ic("discard"), "Roll Back This Deploy"]),
+  ]) : null;
   const links = running ? el("div", { class: "pc-links" }, [
     link("Cancel", () => post({ type: "cancelDeploy" }), "debug-stop"),
     link("Output", () => post({ type: "showOutput" }), "terminal"),
@@ -1248,7 +1269,7 @@ function progressCard() {
     link("Output", () => post({ type: "showOutput" }), "terminal"),
   ]);
 
-  return el("div", { id: "progress-card", class: "pc " + (running ? "running" : ok && !p.healthFailed ? "ok" : "failed") }, [head, now, bar, rows, healthErr, err, links]);
+  return el("div", { id: "progress-card", class: "pc " + (running ? "running" : ok && !p.healthFailed ? "ok" : "failed") }, [head, now, snap, bar, rows, healthErr, err, rollbackBtn, links]);
 }
 
 function fmtBytes(n) {
@@ -1625,6 +1646,11 @@ function renderConfig(root) {
         help: "Files never uploaded. Source maps and type declarations aren't needed to run the site.",
       }),
     ]),
+    el("label", { class: "check-row" }, [
+      el("input", { type: "checkbox", ...(cfg.rollbackSnapshots !== false ? { checked: "checked" } : {}), onchange: (e) => { cfg.rollbackSnapshots = e.target.checked; render(); } }),
+      "Save a rollback copy before each deploy",
+      info("Before uploading, FTPilot downloads the server's current copy of every file the deploy will overwrite or delete, so Roll Back can restore it. Adds download time: small in Incremental mode, roughly doubles a Full deploy. The last 3 copies are kept in .ftbdeploy/rollback/ (gitignored)."),
+    ]),
   ]));
 
   const login = (meta && meta.login) || { hasPassword: false };
@@ -1731,6 +1757,13 @@ function renderConfirmDeploy(isFull, onlyTarget) {
   });
 }
 
+function renderConfirmRollback() {
+  confirmScreen("Roll Back Deploy", [
+    notice("warn", "warning", ["This changes the live server."]),
+    el("p", { class: "hint" }, ["Puts back the server files this deploy overwrote or deleted, deletes the files it created, restarts Node (Passenger) apps, and runs health checks. Your local build, config and git history are not touched. Database changes are not undone."]),
+  ], "Roll Back", "discard", () => { post({ type: "rollback", id: pendingRollback }); pendingRollback = null; view = "form"; render(); });
+}
+
 function renderConfirmBackup() {
   confirmScreen("Backup Server", [
     el("p", { class: "hint" }, ["Downloads every target's remote files into a .zip under .ftbdeploy/backups/. Nothing on the server changes."]),
@@ -1751,6 +1784,7 @@ function render() {
   if (view === "confirmDeploy") return renderConfirmDeploy(false);
   if (view === "confirmFull") return renderConfirmDeploy(true);
   if (view === "confirmDeployTarget" && pendingTarget) return renderConfirmDeploy(false, pendingTarget);
+  if (view === "confirmRollback" && pendingRollback) return renderConfirmRollback();
   root.innerHTML = "";
   if (MODE === "config") renderConfig(root); else renderOps(root);
 }

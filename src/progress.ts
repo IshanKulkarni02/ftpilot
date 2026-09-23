@@ -34,7 +34,13 @@ export interface TargetProgress {
 }
 
 export interface DeployState {
-  kind: "deploy" | "full" | "target" | "preview";
+  kind: "deploy" | "full" | "target" | "preview" | "rollback";
+  /** Snapshot saved before this deploy's uploads (offer Roll Back when set). */
+  rollbackId?: string;
+  /** For a rollback run: which snapshot it restored. */
+  rollbackOf?: string;
+  snapTotal?: number;
+  snapDone?: number;
   /** Preview only: nothing was uploaded. */
   dryRun?: boolean;
   compareRemote?: boolean;
@@ -42,7 +48,7 @@ export interface DeployState {
   onlyTargetId?: string;
   /** Preview: expected upload time from this server's last measured speed. */
   estimateMs?: number;
-  phase: "preparing" | "building" | "comparing" | "uploading" | "checking" | "done" | "failed";
+  phase: "preparing" | "building" | "comparing" | "snapshot" | "uploading" | "checking" | "done" | "failed";
   /** Upload succeeded but at least one health check didn't. */
   healthFailed?: boolean;
   startedAt: number;

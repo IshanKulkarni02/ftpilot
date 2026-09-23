@@ -1,7 +1,7 @@
 import * as vscode from "vscode";
 import * as fs from "fs";
 import * as path from "path";
-import { loadConfig, manifestPath, updateTargetLocalDir, DeployTarget, DEFAULT_MAX_CONNECTIONS, DEFAULT_EXCLUDE } from "./config";
+import { loadConfig, manifestPath, updateTargetLocalDir, DeployTarget, DeployConfig, DEFAULT_MAX_CONNECTIONS, DEFAULT_EXCLUDE } from "./config";
 import { getCredentials } from "./secrets";
 import { getCurrentBranch, checkoutBranch, getShortCommit } from "./git";
 import { runBuild, validateEnvSecrets, BuildError, LogSink } from "./build";
@@ -9,6 +9,7 @@ import { loadManifest, saveManifest, hashTarget, diffTarget, walkDir, globMatche
 import { DeployState, DeployTracker, TargetProgress } from "./progress";
 import { AdaptivePool, CancelledError, Job } from "./parallel";
 import { checkHealth } from "./health";
+import { RollbackInfo, beginSnapshot, saveSnapshot, pruneSnapshots, savedFile, snapshotDir, loadSnapshot, restoreManifest } from "./rollback";
 import { writeReport, writeLog, formatMs } from "./report";
 import { snapshotTopLevelDirs, diffTopLevelDirs } from "./detect";
 import * as ftpClient from "./ftpClient";
@@ -39,6 +40,74 @@ export function cancelDeploy(): void {
   if (!running) return;
   cancelRequested = true;
   killBuild?.();
+}
+
+interface PoolEntry {
+  pool: AdaptivePool;
+  key: string;
+}
+
+/**
+ * The adaptive connection pool for a target's FTP account (one per account per run),
+ * starting from the connection count remembered for this host+user.
+ */
+async function openPool(
+  context: vscode.ExtensionContext,
+  workspaceRoot: string,
+  config: DeployConfig,
+  target: { ftpUser?: string },
+  pools: Map<string, PoolEntry>,
+  tracker: DeployTracker,
+  log: LogSink,
+  say: (m: string) => void
+): Promise<PoolEntry> {
+  const account = target.ftpUser ?? "default";
+  const existing = pools.get(account);
+  if (existing) return existing;
+  const creds = await getCredentials(context, workspaceRoot, account);
+  if (!creds) {
+    throw new Error(
+      account === "default"
+        ? "No FTP login saved for this project. Open the FTPilot configuration and use Update Credentials."
+        : `No password saved for FTP account '${account}'. Open the FTPilot configuration and use Update Credentials on that target.`
+    );
+  }
+  const maxConnections = Math.max(1, Math.min(10, config.maxConnections ?? DEFAULT_MAX_CONNECTIONS));
+  const key = `ftpilot.connections:${config.host}:${config.port}:${creds.user}`;
+  const learned = context.globalState.get<{ start: number; ceiling?: number }>(key);
+  const pool = new AdaptivePool({
+    connect: () => ftpClient.connect(config, creds),
+    start: learned?.start ?? 2,
+    max: maxConnections,
+    ceiling: learned?.ceiling,
+    isCancelled: () => cancelRequested,
+    onEvent: (e) => {
+      log.appendLine(`[connections] ${e.message}`);
+      tracker.update((st) => { st.events.push(e); if (st.events.length > 200) st.events.shift(); });
+    },
+  });
+  const entry = { pool, key };
+  pools.set(account, entry);
+  say(`Connecting to ${config.host}…`);
+  log.appendLine(`\nConnecting to ${config.host}:${config.port} as ${creds.user} (start ${learned?.start ?? 2}, max ${maxConnections} connections)...`);
+  return entry;
+}
+
+/** Mirrors pool stats into the progress state once a second; returns a stop function. */
+function trackPool(pool: AdaptivePool, tracker: DeployTracker): () => void {
+  const sync = () => tracker.update((st) => {
+    const ps = pool.stats();
+    st.connections = ps.active;
+    st.peakConnections = Math.max(st.peakConnections ?? 0, ps.peak);
+    st.rate = ps.rate;
+    st.retries = ps.retries;
+  });
+  const timer = setInterval(sync, 1000);
+  return () => { clearInterval(timer); sync(); };
+}
+
+function runId(): string {
+  return new Date().toISOString().replace(/[:T]/g, "-").slice(0, 19) + "-" + Math.random().toString(36).slice(2, 6);
 }
 
 function fileSize(p: string): number {
@@ -185,7 +254,7 @@ async function runDeployInner(
       };
 
       // One adaptive pool per FTP account, reused across that account's targets.
-      const pools = new Map<string, { pool: AdaptivePool; key: string }>();
+      const pools = new Map<string, PoolEntry>();
       const maxConnections = Math.max(1, Math.min(10, config.maxConnections ?? DEFAULT_MAX_CONNECTIONS));
       const exclude = globMatcher(config.exclude ?? DEFAULT_EXCLUDE);
       token.onCancellationRequested(() => { cancelRequested = true; });
@@ -321,52 +390,89 @@ async function runDeployInner(
           return await finishPreview(plans);
         }
 
+        // 4a. Rollback snapshot: download the server's current copy of everything this deploy
+        // will overwrite or delete (files that don't exist yet are recorded as "created").
+        // If this fails, nothing has been uploaded yet, so the deploy stops safely.
+        if (config.rollbackSnapshots !== false && s.totalOps > 0) {
+          const info: RollbackInfo = {
+            id: runId(), createdAt: Date.now(), project: s.project, branch: s.branch, commit: s.commit, host: s.host, complete: false,
+            targets: plans.map((p) => ({
+              id: p.target.id ?? p.target.name, name: p.target.name, remoteDir: p.target.remoteDir, restartFile: p.target.restartFile,
+              ftpUser: p.target.ftpUser, healthUrl: p.target.healthUrl, healthExpect: p.target.healthExpect, restore: [], created: [],
+            })),
+          };
+          beginSnapshot(workspaceRoot, info);
+          tracker.update((st) => { st.phase = "snapshot"; st.snapTotal = st.totalOps; st.snapDone = 0; });
+          log.appendLine(`\n=== Saving rollback copy (${s.totalOps} file(s)) ===`);
+          try {
+            for (const [i, { target, toUpload, toRemove }] of plans.entries()) {
+              if (cancelRequested) throw new CancelledError();
+              const rt = info.targets[i];
+              const removing = new Set(toRemove);
+              tracker.update((st) => { st.currentTarget = target.name; });
+              const { pool } = await openPool(context, workspaceRoot, config, target, pools, tracker, log, say);
+              const stopTracking = trackPool(pool, tracker);
+              try {
+                await pool.run([...toUpload, ...toRemove].map((rel): Job => ({
+                  label: `rollback copy of ${rel}`,
+                  bytes: 0,
+                  attempts: 0,
+                  run: async (c) => {
+                    const dest = savedFile(workspaceRoot, info.id, rt.id, rel);
+                    fs.mkdirSync(path.dirname(dest), { recursive: true });
+                    try {
+                      await c.downloadTo(dest, ftpClient.remoteJoin(target.remoteDir, rel));
+                      rt.restore.push(rel);
+                    } catch (err) {
+                      if ((err as { code?: unknown }).code !== 550) throw err;
+                      fs.rmSync(dest, { force: true });
+                      // 550 means "not found" *or* "not allowed". Only a confirmed-missing file may be
+                      // recorded as created, because rolling back deletes created files.
+                      const remote = ftpClient.remoteJoin(target.remoteDir, rel);
+                      let exists: boolean;
+                      try {
+                        await c.size(remote);
+                        exists = true;
+                      } catch (sizeErr) {
+                        if ((sizeErr as { code?: unknown }).code !== 550) {
+                          throw new Error(`can't tell whether ${rel} already exists on the server (${(err as Error).message.trim()})`);
+                        }
+                        exists = false;
+                      }
+                      if (exists) throw new Error(`${rel} exists on the server but couldn't be downloaded (${(err as Error).message.trim()})`);
+                      if (!removing.has(rel)) rt.created.push(rel);
+                    }
+                    tracker.update((st) => { st.snapDone = (st.snapDone ?? 0) + 1; st.currentFile = rel; });
+                    say(`Saving rollback copy: ${s.snapDone} / ${s.snapTotal}`);
+                  },
+                })));
+              } finally {
+                stopTracking();
+              }
+            }
+          } catch (err) {
+            fs.rmSync(snapshotDir(workspaceRoot, info.id), { recursive: true, force: true });
+            if (err instanceof CancelledError) throw err;
+            throw new Error(`Couldn't save the rollback copy, so nothing was uploaded: ${(err as Error).message}. Turn off rollback snapshots in the configuration to deploy without one.`);
+          }
+          info.complete = true;
+          saveSnapshot(workspaceRoot, info);
+          pruneSnapshots(workspaceRoot);
+          tracker.update((st) => { st.rollbackId = info.id; });
+          const saved = info.targets.reduce((n, t) => n + t.restore.length, 0);
+          const created = info.targets.reduce((n, t) => n + t.created.length, 0);
+          log.appendLine(`Rollback copy saved: ${saved} existing file(s); ${created} file(s) will be new.`);
+        }
+
         // 4. Upload over an adaptive pool of connections: folders first (so parallel
         // connections never race to create one), then assets, then HTML last so pages only
         // ever reference assets that are already on the server, then deletions.
         tracker.update((st) => { st.phase = "uploading"; });
         for (const { target, localDir, tp, toUpload, toRemove } of plans) {
           if (cancelRequested) throw new CancelledError();
-          const account = target.ftpUser ?? "default";
-          const creds = await getCredentials(context, workspaceRoot, account);
-          if (!creds) {
-            throw new Error(
-              account === "default"
-                ? "No FTP login saved for this project. Open the FTPilot configuration and use Update Credentials."
-                : `No password saved for FTP account '${account}'. Open the FTPilot configuration and use Update Credentials on that target.`
-            );
-          }
           tracker.update((st) => { st.currentTarget = target.name; st.currentFile = undefined; tp.status = "uploading"; });
-
-          let entry = pools.get(account);
-          if (!entry) {
-            const key = `ftpilot.connections:${config.host}:${config.port}:${creds.user}`;
-            const learned = context.globalState.get<{ start: number; ceiling?: number }>(key);
-            const pool = new AdaptivePool({
-              connect: () => ftpClient.connect(config, creds),
-              start: learned?.start ?? 2,
-              max: maxConnections,
-              ceiling: learned?.ceiling,
-              isCancelled: () => cancelRequested,
-              onEvent: (e) => {
-                log.appendLine(`[connections] ${e.message}`);
-                tracker.update((st) => { st.events.push(e); if (st.events.length > 200) st.events.shift(); });
-              },
-            });
-            entry = { pool, key };
-            pools.set(account, entry);
-            say(`Connecting to ${config.host}…`);
-            log.appendLine(`\nConnecting to ${config.host}:${config.port} as ${creds.user} (start ${learned?.start ?? 2}, max ${maxConnections} connections)...`);
-          }
-          const { pool } = entry;
-          const syncPool = () => tracker.update((st) => {
-            const ps = pool.stats();
-            st.connections = ps.active;
-            st.peakConnections = Math.max(st.peakConnections ?? 0, ps.peak);
-            st.rate = ps.rate;
-            st.retries = ps.retries;
-          });
-          const poolTimer = setInterval(syncPool, 1000);
+          const { pool } = await openPool(context, workspaceRoot, config, target, pools, tracker, log, say);
+          const stopTracking = trackPool(pool, tracker);
 
           log.appendLine(`\n=== Uploading: ${target.name} -> ${target.remoteDir} (${useFull ? "full" : "incremental"}) ===`);
           const t0 = Date.now();
@@ -417,8 +523,7 @@ async function runDeployInner(
               tp.restarted = true;
             }
           } finally {
-            clearInterval(poolTimer);
-            syncPool();
+            stopTracking();
           }
           tracker.update(() => { tp.uploadMs = Date.now() - t0; tp.status = "done"; });
         }
@@ -516,4 +621,160 @@ function finish(workspaceRoot: string, tracker: DeployTracker, logLines: string[
     console.error("FTPilot: couldn't write report/log", err);
   }
   tracker.emitNow();
+}
+
+/**
+ * Undoes one deploy using its snapshot: re-uploads the saved server copies, deletes files the
+ * deploy created, restarts Passenger apps, restores FTPilot's manifest, then health-checks.
+ */
+export async function runRollback(
+  context: vscode.ExtensionContext,
+  output: vscode.OutputChannel,
+  statusBar: vscode.StatusBarItem,
+  options: { snapshotId: string; onProgress?: (state: DeployState) => void }
+): Promise<DeployResult> {
+  const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+  if (!workspaceRoot) return { ok: false, message: "No folder open." };
+  if (running) {
+    void vscode.window.showWarningMessage("FTPilot: a deploy is already running.");
+    return { ok: false, message: "Already running." };
+  }
+  const info = loadSnapshot(workspaceRoot, options.snapshotId);
+  const problem = !info ? "That rollback copy no longer exists (only the last 3 are kept)."
+    : !info.complete ? "That rollback copy is incomplete and can't be used."
+    : info.rolledBackAt ? "That deploy was already rolled back."
+    : undefined;
+  if (problem || !info) {
+    void vscode.window.showErrorMessage(`FTPilot: ${problem}`);
+    return { ok: false, message: problem! };
+  }
+
+  running = true;
+  cancelRequested = false;
+  try {
+    const config = loadConfig(workspaceRoot, false);
+    const tracker = new DeployTracker(
+      {
+        kind: "rollback",
+        phase: "uploading",
+        startedAt: Date.now(),
+        project: info.project,
+        branch: info.branch,
+        commit: info.commit,
+        host: `${config.host}:${config.port} (${config.secure ? "FTPS" : "FTP"})`,
+        strategy: "incremental",
+        rollbackOf: info.id,
+        targets: info.targets.map((t) => ({
+          name: t.name, localDir: "(rollback copy)", remoteDir: t.remoteDir, status: "pending",
+          toUpload: t.restore.length, uploaded: 0, toRemove: t.created.length, removed: 0, unchanged: 0,
+          uploadedFiles: [], removedFiles: [],
+        })),
+        totalOps: info.targets.reduce((n, t) => n + t.restore.length + t.created.length, 0),
+        doneOps: 0,
+        totalBytes: 0,
+        doneBytes: 0,
+        connections: 0,
+        events: [],
+      },
+      options.onProgress
+    );
+    const s = tracker.state;
+    const logLines: string[] = [];
+    const log: LogSink = {
+      append: (v: string) => { output.append(v); logLines.push(v); },
+      appendLine: (v: string) => { output.appendLine(v); logLines.push(v + "\n"); },
+    };
+    output.clear();
+    log.appendLine(`FTPilot rollback — ${new Date().toLocaleString()} — undoing deploy of ${new Date(info.createdAt).toLocaleString()}${info.commit ? ` (${info.commit})` : ""}`);
+
+    return await vscode.window.withProgress(
+      { location: vscode.ProgressLocation.Notification, title: "FTPilot rollback", cancellable: true },
+      async (vsProgress, token) => {
+        token.onCancellationRequested(() => { cancelRequested = true; });
+        const say = (message: string) => { vsProgress.report({ message }); statusBar.text = `$(sync~spin) FTPilot: ${message}`; };
+        const pools = new Map<string, PoolEntry>();
+        try {
+          for (const [i, rt] of info.targets.entries()) {
+            if (cancelRequested) throw new CancelledError();
+            const tp = s.targets[i];
+            tracker.update((st) => { st.currentTarget = rt.name; tp.status = "uploading"; });
+            const { pool } = await openPool(context, workspaceRoot, config, rt, pools, tracker, log, say);
+            const stopTracking = trackPool(pool, tracker);
+            const t0 = Date.now();
+            try {
+              log.appendLine(`\n=== Restoring ${rt.name}: ${rt.restore.length} file(s) back, ${rt.created.length} to delete ===`);
+              const dirs = [...new Set(rt.restore.map((rel) => path.posix.dirname(ftpClient.remoteJoin(rt.remoteDir, rel))))].sort();
+              if (dirs.length) await pool.withClient((c) => ftpClient.ensureDirs(c, dirs));
+              await pool.run(rt.restore.map((rel): Job => ({
+                label: rel, bytes: 0, attempts: 0,
+                run: async (c) => {
+                  await c.uploadFrom(savedFile(workspaceRoot, info.id, rt.id, rel), ftpClient.remoteJoin(rt.remoteDir, rel));
+                  log.appendLine(`  ↺ ${rel}`);
+                  tracker.update((st) => { tp.uploaded++; tp.uploadedFiles.push(rel); st.doneOps++; st.currentFile = rel; });
+                  say(`Restoring ${rt.name}: ${tp.uploaded} / ${tp.toUpload}`);
+                },
+              })));
+              await pool.run(rt.created.map((rel): Job => ({
+                label: rel, bytes: 0, attempts: 0,
+                run: async (c) => {
+                  await ftpClient.removeOne(c, rt.remoteDir, rel);
+                  log.appendLine(`  - ${rel}`);
+                  tracker.update((st) => { tp.removed++; tp.removedFiles.push(rel); st.doneOps++; st.currentFile = rel; });
+                },
+              })));
+              if (rt.restartFile) {
+                say(`Restarting ${rt.name}…`);
+                await pool.withClient((c) => ftpClient.touchRestartFile(c, rt.restartFile!));
+                tp.restarted = true;
+              }
+            } finally {
+              stopTracking();
+            }
+            tracker.update(() => { tp.uploadMs = Date.now() - t0; tp.status = "done"; });
+          }
+
+          restoreManifest(workspaceRoot, info.id);
+          info.rolledBackAt = Date.now();
+          saveSnapshot(workspaceRoot, info);
+
+          const checks = info.targets.map((rt, i) => ({ rt, tp: s.targets[i] })).filter(({ rt }) => rt.healthUrl);
+          if (checks.length) {
+            tracker.update((st) => { st.phase = "checking"; });
+            if (info.targets.some((t) => t.restartFile)) await new Promise((r) => setTimeout(r, 3000));
+            for (const { rt, tp } of checks) {
+              const result = await checkHealth(rt.healthUrl!, rt.healthExpect || undefined, { isCancelled: () => cancelRequested, onAttempt: (a, n) => say(`Health check ${rt.name} (${a}/${n})…`) });
+              log.appendLine(`Health check ${rt.name}: ${result.ok ? `OK (HTTP ${result.status})` : `FAILED: ${result.error}`}`);
+              tracker.update((st) => { tp.health = result; if (!result.ok) st.healthFailed = true; });
+            }
+          }
+
+          tracker.update((st) => { st.phase = "done"; st.finishedAt = Date.now(); st.currentTarget = undefined; st.currentFile = undefined; });
+          const message = `Rolled back in ${formatMs(s.finishedAt! - s.startedAt)}: ${s.targets.reduce((n, t) => n + t.uploaded, 0)} file(s) restored, ${s.targets.reduce((n, t) => n + t.removed, 0)} removed.`;
+          log.appendLine(`\n${message}`);
+          finish(workspaceRoot, tracker, logLines);
+          void vscode.window.showInformationMessage(`FTPilot: ${message}`, "Open Report").then((c) => {
+            if (c) void vscode.env.openExternal(vscode.Uri.file(s.reportPath!));
+          });
+          return { ok: true, message };
+        } catch (err) {
+          const cancelled = err instanceof CancelledError;
+          const message = (err as Error).message;
+          log.appendLine(`\nERROR: ${message}`);
+          tracker.update((st) => {
+            st.phase = "failed"; st.finishedAt = Date.now(); st.error = { message: cancelled ? message : `Rollback incomplete: ${message}. You can run Roll Back again.` }; st.cancelled = cancelled;
+            const current = st.targets.find((t) => t.name === st.currentTarget && t.status !== "done");
+            if (current) current.status = "failed";
+          });
+          finish(workspaceRoot, tracker, logLines);
+          void vscode.window.showErrorMessage(`FTPilot rollback ${cancelled ? "cancelled" : "failed"}: ${message}`, "Show Output").then((c) => { if (c) output.show(true); });
+          return { ok: false, message };
+        } finally {
+          for (const { pool } of pools.values()) pool.close();
+          statusBar.text = "$(cloud-upload) Deploy";
+        }
+      }
+    );
+  } finally {
+    running = false;
+  }
 }

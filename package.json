@@ -55,6 +55,21 @@
         "command": "ftpilot.openHelp",
         "title": "FTPilot: Quick Reference",
         "icon": "$(question)"
+      },
+      {
+        "command": "ftpilot.preview",
+        "title": "FTPilot: Preview Deploy (Dry Run)",
+        "icon": "$(eye)"
+      },
+      {
+        "command": "ftpilot.rollback",
+        "title": "FTPilot: Roll Back a Deploy\u2026",
+        "icon": "$(discard)"
+      },
+      {
+        "command": "ftpilot.cancelDeploy",
+        "title": "FTPilot: Cancel Running Deploy",
+        "icon": "$(debug-stop)"
       }
     ],
     "viewsContainers": {

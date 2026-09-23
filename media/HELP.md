@@ -19,6 +19,14 @@ FTPilot builds your project and uploads it over FTP to one or more cPanel domain
 
 The branch row shows a check when you are on the deploy branch, and a warning when you are not. Deploying from another branch asks you first.
 
+## Roll back
+
+- Before uploading, FTPilot saves the server's current copy of every file the deploy will overwrite or delete (setting: **Save a rollback copy before each deploy**, on by default).
+- **Roll Back This Deploy** appears on the finished card (success, failed health check, or a deploy that failed mid-upload). It puts those files back, deletes files the deploy created, restarts Node apps, restores FTPilot's upload record, and runs health checks.
+- Older deploys: Command Palette → **FTPilot: Roll Back a Deploy…** (last 3 kept, in `.ftbdeploy/rollback/`, gitignored).
+- If a file exists on the server but can't be downloaded, the deploy stops *before uploading anything*, so a rollback can never delete a file it didn't create.
+- Database changes are not undone.
+
 ## Configuration (editor tab)
 
 Open it with the gear icon. Changes are kept as a draft until you **Save Configuration**.
