@@ -18,11 +18,6 @@
   "contributes": {
     "commands": [
       {
-        "command": "ftpilot.setup",
-        "title": "FTPilot: Configure Project",
-        "icon": "$(gear)"
-      },
-      {
         "command": "ftpilot.deploy",
         "title": "FTPilot: Deploy / Redeploy",
         "icon": "$(cloud-upload)"
@@ -41,11 +36,6 @@
         "command": "ftpilot.editConfig",
         "title": "FTPilot: Edit Config File",
         "icon": "$(json)"
-      },
-      {
-        "command": "ftpilot.refreshTree",
-        "title": "FTPilot: Refresh",
-        "icon": "$(refresh)"
       }
     ],
     "viewsContainers": {
@@ -53,50 +43,16 @@
         {
           "id": "ftpilot",
           "title": "FTPilot",
-          "icon": "media/activitybar-icon.svg"
+          "icon": "media/activitybar-icon-128.png"
         }
       ]
     },
     "views": {
       "ftpilot": [
         {
-          "id": "ftpilotTargets",
-          "name": "Deploy Targets"
-        }
-      ]
-    },
-    "viewsWelcome": [
-      {
-        "view": "ftpilotTargets",
-        "contents": "No FTPilot config found in this project.\n[Configure Project](command:ftpilot.setup)"
-      }
-    ],
-    "menus": {
-      "view/title": [
-        {
-          "command": "ftpilot.deploy",
-          "when": "view == ftpilotTargets",
-          "group": "navigation@1"
-        },
-        {
-          "command": "ftpilot.fullRedeploy",
-          "when": "view == ftpilotTargets",
-          "group": "navigation@2"
-        },
-        {
-          "command": "ftpilot.setCredentials",
-          "when": "view == ftpilotTargets",
-          "group": "navigation@3"
-        },
-        {
-          "command": "ftpilot.editConfig",
-          "when": "view == ftpilotTargets",
-          "group": "navigation@4"
-        },
-        {
-          "command": "ftpilot.setup",
-          "when": "view == ftpilotTargets",
-          "group": "navigation@5"
+          "id": "ftpilotPanel",
+          "name": "FTPilot",
+          "type": "webview"
         }
       ]
     }

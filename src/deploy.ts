@@ -14,16 +14,21 @@ export interface DeployOptions {
   forceFull?: boolean;
 }
 
+export interface DeployResult {
+  ok: boolean;
+  message: string;
+}
+
 export async function runDeploy(
   context: vscode.ExtensionContext,
   output: vscode.OutputChannel,
   statusBar: vscode.StatusBarItem,
   options: DeployOptions = {}
-): Promise<void> {
+): Promise<DeployResult> {
   const folders = vscode.workspace.workspaceFolders;
   if (!folders || folders.length === 0) {
     void vscode.window.showErrorMessage("FTPilot: open a folder/workspace first.");
-    return;
+    return { ok: false, message: "No folder open." };
   }
   const workspaceRoot = folders[0].uri.fsPath;
 
@@ -33,12 +38,12 @@ export async function runDeploy(
   } catch (err) {
     const choice = await vscode.window.showErrorMessage(
       (err as Error).message,
-      "Configure Now"
+      "Open FTPilot Panel"
     );
-    if (choice === "Configure Now") {
-      await vscode.commands.executeCommand("ftpilot.setup");
+    if (choice === "Open FTPilot Panel") {
+      await vscode.commands.executeCommand("ftpilotPanel.focus");
     }
-    return;
+    return { ok: false, message: (err as Error).message };
   }
 
   if (config.warnIfNotOnBranch) {
@@ -51,7 +56,7 @@ export async function runDeploy(
           "Deploy Anyway"
         );
         if (choice !== "Deploy Anyway") {
-          return;
+          return { ok: false, message: "Cancelled (not on deploy branch)." };
         }
       }
     } catch {
@@ -166,14 +171,15 @@ export async function runDeploy(
     const seconds = ((Date.now() - startedAt) / 1000).toFixed(1);
     output.appendLine(`\nDone in ${seconds}s. ${totalUploaded} uploaded, ${totalRemoved} removed.`);
     statusBar.text = "$(cloud-upload) Deploy";
-    void vscode.window.showInformationMessage(
-      `FTPilot: done in ${seconds}s (${totalUploaded} uploaded, ${totalRemoved} removed).`
-    );
+    const message = `Done in ${seconds}s (${totalUploaded} uploaded, ${totalRemoved} removed).`;
+    void vscode.window.showInformationMessage(`FTPilot: ${message}`);
+    return { ok: true, message };
   } catch (err) {
     const message = (err as Error).message;
     output.appendLine(`\nERROR: ${message}`);
     statusBar.text = "$(cloud-upload) Deploy";
     void vscode.window.showErrorMessage(`FTPilot failed: ${message}`);
+    return { ok: false, message };
   } finally {
     if (client) {
       client.close();
