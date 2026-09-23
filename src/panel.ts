@@ -27,6 +27,8 @@ type InMsg =
   | { type: "showOutput" }
   | { type: "dismissProgress" }
   | { type: "cancelDeploy" }
+  | { type: "preview"; targetId?: string; compareRemote?: boolean; skipBuild?: boolean }
+  | { type: "deployFromPreview" }
   | { type: "testFtps"; config: DeployConfig }
   | {
       type: "saveConfig";
@@ -370,6 +372,16 @@ export class FtpilotPanel implements vscode.WebviewViewProvider {
         }
         return;
       }
+
+      case "preview":
+        await vscode.commands.executeCommand("ftpilot.preview", { targetId: msg.targetId, compareRemote: msg.compareRemote, skipBuild: msg.skipBuild });
+        this.postInit();
+        return;
+
+      case "deployFromPreview":
+        await vscode.commands.executeCommand("ftpilot.deployPreview", { targetId: this.progress?.onlyTargetId });
+        this.postInit();
+        return;
 
       case "cancelDeploy":
         await vscode.commands.executeCommand("ftpilot.cancelDeploy");
@@ -741,6 +753,9 @@ const CSS = `
   .pc-bar { height: 4px; margin-top: 8px; border-radius: 2px; background: var(--vscode-progressBar-background, var(--vscode-button-background)); background: color-mix(in srgb, var(--vscode-progressBar-background, #0078d4) 20%, transparent); overflow: hidden; }
   .pc-bar > div { height: 100%; background: var(--vscode-progressBar-background, var(--vscode-button-background)); transition: width .2s; }
   .pc-count { display: flex; justify-content: space-between; margin-top: 3px; font-variant-numeric: tabular-nums; }
+  .pc-actions { margin-top: 8px; }
+  .pc.preview .pc-head > .codicon { color: var(--vscode-textLink-foreground); }
+  .pc .notice { margin: 8px 0 0; }
   .pc-stats { margin-top: 2px; font-variant-numeric: tabular-nums; }
   .pc-targets { list-style: none; margin: 8px 0 0; padding: 0; }
   .pc-targets li { display: grid; grid-template-columns: 16px minmax(0, 1fr) auto; gap: 6px; align-items: center; min-height: 20px; }
@@ -1153,7 +1168,8 @@ function progressCard() {
   if (!p || MODE !== "ops") return null;
   const running = isRunning(p);
   const ok = p.phase === "done";
-  const title = running ? (PHASE_TITLE[p.phase] || "Working") : ok ? "Deploy succeeded" : p.cancelled ? "Deploy cancelled" : "Deploy failed";
+  if (!running && ok && p.dryRun) return previewCard(p);
+  const title = running ? (p.dryRun && p.phase !== "building" ? "Previewing" : PHASE_TITLE[p.phase] || "Working") : ok ? "Deploy succeeded" : p.cancelled ? (p.dryRun ? "Preview cancelled" : "Deploy cancelled") : p.dryRun ? "Preview failed" : "Deploy failed";
   const head = el("div", { class: "pc-head" }, [
     ic(running ? "loading codicon-modifier-spin" : ok ? "pass-filled" : "error"),
     el("strong", {}, [title]),
@@ -1211,6 +1227,49 @@ function progressCard() {
   return el("div", { id: "progress-card", class: "pc " + (running ? "running" : ok ? "ok" : "failed") }, [head, now, bar, rows, err, links]);
 }
 
+function fmtBytes(n) {
+  if (!n) return "0 KB";
+  return n >= 1048576 ? (n / 1048576).toFixed(1) + " MB" : Math.max(1, Math.round(n / 1024)) + " KB";
+}
+
+// Finished preview: what a deploy would do, and a one-click way to do exactly that.
+function previewCard(p) {
+  const pending = p.totalOps;
+  const drift = p.targets.reduce((n, t) => n + (t.driftCount || 0), 0);
+  const head = el("div", { class: "pc-head" }, [
+    ic("eye"),
+    el("strong", {}, [pending ? "Preview ready" : "Nothing to deploy"]),
+    el("span", { class: "muted pc-time" }, [fmtMs(p.finishedAt - p.startedAt)]),
+    iconBtn("close", "Dismiss", () => post({ type: "dismissProgress" })),
+  ]);
+  const summary = el("div", { class: "pc-count muted" }, [
+    pending
+      ? pending + " file" + (pending === 1 ? "" : "s") + " · " + fmtBytes(p.totalBytes) + (p.estimateMs ? " · ~" + fmtMs(p.estimateMs) : "")
+      : (p.compareRemote ? "Build matches the last deploy." : "Build matches FTPilot's record of the last deploy."),
+  ]);
+  const rows = el("ul", { class: "pc-targets" }, p.targets.map((t) => {
+    const parts = [];
+    if (t.newCount) parts.push(t.newCount + " new");
+    if (t.changedCount) parts.push(t.changedCount + " changed");
+    if (t.toRemove) parts.push(t.toRemove + " to remove");
+    parts.push(t.unchanged + " same");
+    return el("li", { class: "pc-built" }, [ic(t.toUpload || t.toRemove ? "diff" : "check"), el("span", { class: "n" }, [t.name]), el("span", { class: "r" }, [parts.join(", ")])]);
+  }));
+  const driftNote = p.compareRemote
+    ? (drift
+        ? notice("warn", "warning", [drift + " file(s) differ on the server from FTPilot's record (edited outside FTPilot?). A normal deploy won't resend them; Full Re-upload will."])
+        : el("div", { class: "pc-stats muted" }, ["Server matches FTPilot's record."]))
+    : null;
+  const actions = el("div", { class: "pc-actions" }, [
+    pending ? el("button", { class: "block", onclick: () => post({ type: "deployFromPreview" }) }, [ic("cloud-upload"), "Deploy These Changes"]) : null,
+  ]);
+  const links = el("div", { class: "pc-links" }, [
+    p.compareRemote ? null : link("Compare with server", () => post({ type: "preview", targetId: p.onlyTargetId, compareRemote: true, skipBuild: true }), "remote-explorer"),
+    p.reportPath ? link("Open Report", () => post({ type: "openReport" }), "file") : null,
+  ]);
+  return el("div", { id: "progress-card", class: "pc ok preview" }, [head, summary, rows, driftNote, actions, links]);
+}
+
 function refreshProgressCard() {
   const old = document.getElementById("progress-card");
   const neu = progressCard();
@@ -1266,6 +1325,7 @@ function opsTargetCard(t) {
   return el("div", { class: "card ops" }, [
     el("div", { class: "card-head" }, [
       el("span", { class: "title" }, [t.name || "(unnamed target)"]),
+      iconBtn("eye", "Preview " + (t.name || "this target") + " (upload nothing)", () => post({ type: "preview", targetId: targetKey(t) }), isRunning(progress)),
       iconBtn("cloud-upload", "Deploy only " + (t.name || "this target"), () => { pendingTarget = t; view = "confirmDeployTarget"; render(); }, isRunning(progress)),
       iconBtn("settings-gear", "Target Settings", () => post({ type: "openInEditor", targetId: targetKey(t) })),
     ]),
@@ -1303,7 +1363,8 @@ function renderOps(root) {
     count: saved.targets.length,
     actions: [iconBtn("add", "Add Target", () => post({ type: "openInEditor", addTarget: true }))],
   }));
-  root.appendChild(el("div", { class: "actions-row two" }, [
+  root.appendChild(el("div", { class: "actions-row" }, [
+    el("button", { class: "secondary", title: "Build and show what would change, without uploading", ...(busy ? { disabled: "disabled" } : {}), onclick: () => post({ type: "preview" }) }, [ic("eye"), "Preview"]),
     el("button", { class: "secondary", title: "Download remote files to a local .zip", ...(busy ? { disabled: "disabled" } : {}), onclick: () => { view = "confirmBackup"; render(); } }, [ic("archive"), "Backup"]),
     el("button", { class: "secondary", title: "Re-upload every file, ignoring what changed", ...(busy ? { disabled: "disabled" } : {}), onclick: () => { view = "confirmFull"; render(); } }, [ic("sync"), "Full Re-upload"]),
   ]));

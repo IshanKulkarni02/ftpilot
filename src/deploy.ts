@@ -6,7 +6,7 @@ import { getCredentials } from "./secrets";
 import { getCurrentBranch, checkoutBranch, getShortCommit } from "./git";
 import { runBuild, validateEnvSecrets, BuildError, LogSink } from "./build";
 import { loadManifest, saveManifest, hashTarget, diffTarget, walkDir, globMatcher, Manifest } from "./manifest";
-import { DeployState, DeployTracker } from "./progress";
+import { DeployState, DeployTracker, TargetProgress } from "./progress";
 import { AdaptivePool, CancelledError, Job } from "./parallel";
 import { writeReport, writeLog, formatMs } from "./report";
 import { snapshotTopLevelDirs, diffTopLevelDirs } from "./detect";
@@ -17,6 +17,12 @@ export interface DeployOptions {
   forceFull?: boolean;
   /** Build + upload only this target (matched by id, falling back to name). */
   onlyTargetId?: string;
+  /** Build + compare only; upload nothing. */
+  dryRun?: boolean;
+  /** Preview only: also list the server's files to catch changes made outside FTPilot. */
+  compareRemote?: boolean;
+  /** Reuse existing build output (e.g. "Deploy These Changes" right after a preview). */
+  skipBuild?: boolean;
   /** Live progress snapshots (throttled) for the panel. */
   onProgress?: (state: DeployState) => void;
 }
@@ -124,7 +130,8 @@ async function runDeployInner(
     // not a git repo, or git not available — skip the branch check silently
   }
 
-  const kind: DeployState["kind"] = options.onlyTargetId ? "target" : options.forceFull ? "full" : "deploy";
+  const kind: DeployState["kind"] = options.dryRun ? "preview" : options.onlyTargetId ? "target" : options.forceFull ? "full" : "deploy";
+  const rateKey = `ftpilot.rate:${config.host}:${config.port}`;
   const useFull = !!options.forceFull || config.uploadMode === "full";
   const tracker = new DeployTracker(
     {
@@ -141,6 +148,9 @@ async function runDeployInner(
         status: "pending", toUpload: 0, uploaded: 0, toRemove: 0, removed: 0, unchanged: 0,
         uploadedFiles: [], removedFiles: [],
       })),
+      dryRun: options.dryRun,
+      compareRemote: options.compareRemote,
+      onlyTargetId: options.onlyTargetId,
       totalOps: 0,
       doneOps: 0,
       totalBytes: 0,
@@ -179,6 +189,51 @@ async function runDeployInner(
       const exclude = globMatcher(config.exclude ?? DEFAULT_EXCLUDE);
       token.onCancellationRequested(() => { cancelRequested = true; });
 
+      type Plan = { target: DeployTarget; localDir: string; tp: TargetProgress; all: string[]; toUpload: string[]; toRemove: string[] };
+
+      // Preview: report what a deploy would do, optionally checked against the server's real
+      // file list, then stop. Nothing is uploaded and the manifest is left untouched.
+      const finishPreview = async (plans: Plan[]): Promise<DeployResult> => {
+        if (options.compareRemote) {
+          tracker.update((st) => { st.phase = "comparing"; });
+          for (const { target, localDir, tp, all, toUpload } of plans) {
+            const account = target.ftpUser ?? "default";
+            const creds = await getCredentials(context, workspaceRoot, account);
+            if (!creds) throw new Error(`No FTP login saved for '${account}'. Use Update Credentials first.`);
+            say(`Reading server files for ${target.name}…`);
+            tracker.update((st) => { st.currentTarget = target.name; });
+            const client = await ftpClient.connect(config, creds);
+            try {
+              const remote = await ftpClient.listRemoteFiles(client, target.remoteDir);
+              const pending = new Set(toUpload);
+              const local = new Set(all);
+              // Files FTPilot believes are current, but the server has a different size or lacks.
+              tp.driftFiles = all.filter((rel) => !pending.has(rel) && remote.get(rel) !== fileSize(path.join(localDir, rel)));
+              tp.driftCount = tp.driftFiles.length;
+              tp.extraCount = [...remote.keys()].filter((rel) => !local.has(rel)).length;
+              log.appendLine(`[${target.name}] server has ${remote.size} files; ${tp.driftCount} differ from FTPilot's record; ${tp.extraCount} extra (left untouched).`);
+            } finally {
+              client.close();
+            }
+          }
+        }
+        // The report's "Would remove" list reads removedFiles; nothing was actually removed.
+        for (const { tp, toRemove } of plans) tp.removedFiles = [...toRemove];
+        const rate = context.globalState.get<number>(rateKey);
+        tracker.update((st) => {
+          st.phase = "done";
+          st.finishedAt = Date.now();
+          st.currentTarget = undefined;
+          if (rate && st.totalOps) st.estimateMs = (st.totalOps / rate) * 1000;
+        });
+        const message = s.totalOps
+          ? `Preview: ${s.totalOps} file operation(s) pending, nothing uploaded.`
+          : "Preview: nothing to deploy; everything matches the last deploy.";
+        log.appendLine(`\n${message}`);
+        finish(workspaceRoot, tracker, logLines);
+        return { ok: true, message };
+      };
+
       try {
         // 1. Fail fast on any missing secret env var before building anything.
         say("Checking settings…");
@@ -197,7 +252,14 @@ async function runDeployInner(
           const before = target.buildCommand ? snapshotTopLevelDirs(buildCwd) : undefined;
           const t0 = Date.now();
 
-          await runBuild(context, target, workspaceRoot, log, (line) => tracker.update((st) => { st.lastLine = line; }), (kill) => { killBuild = kill; });
+          if (options.skipBuild) {
+            if (!fs.existsSync(path.join(workspaceRoot, target.localDir))) {
+              throw new Error(`[${target.name}] build output '${target.localDir}' is gone. Run Preview again.`);
+            }
+            log.appendLine(`Using the existing build output from the preview (no rebuild).`);
+          } else {
+            await runBuild(context, target, workspaceRoot, log, (line) => tracker.update((st) => { st.lastLine = line; }), (kill) => { killBuild = kill; });
+          }
           killBuild = undefined;
           if (cancelRequested) throw new CancelledError();
 
@@ -241,7 +303,11 @@ async function runDeployInner(
           tp.toUpload = diff.toUpload.length;
           tp.toRemove = diff.toRemove.length;
           tp.unchanged = all.length - diff.toUpload.length;
-          return { target, localDir, tp, ...diff };
+          tp.newFiles = diff.toUpload.filter((rel) => !(`${target.name}/${rel}` in oldManifest));
+          tp.changedFiles = diff.toUpload.filter((rel) => `${target.name}/${rel}` in oldManifest);
+          tp.newCount = tp.newFiles.length;
+          tp.changedCount = tp.changedFiles.length;
+          return { target, localDir, tp, all, ...diff };
         });
         if (excludedCount) log.appendLine(`Skipping ${excludedCount} file(s) matching exclude patterns: ${(config.exclude ?? DEFAULT_EXCLUDE).join(", ")}`);
         tracker.update((st) => {
@@ -249,6 +315,10 @@ async function runDeployInner(
           st.totalBytes = plans.reduce((n, p) => n + p.toUpload.reduce((b, rel) => b + fileSize(path.join(p.localDir, rel)), 0), 0);
           st.maxConnections = maxConnections;
         });
+
+        if (options.dryRun) {
+          return await finishPreview(plans);
+        }
 
         // 4. Upload over an adaptive pool of connections: folders first (so parallel
         // connections never race to create one), then assets, then HTML last so pages only
@@ -352,7 +422,10 @@ async function runDeployInner(
           tracker.update(() => { tp.uploadMs = Date.now() - t0; tp.status = "done"; });
         }
 
-        // Remember what worked so the next deploy starts at full speed.
+        // Remember what worked so the next deploy starts at full speed, and how fast it
+        // went so a Preview can estimate the time.
+        const uploadMs = s.targets.reduce((n, t) => n + (t.uploadMs ?? 0), 0);
+        if (s.doneOps > 20 && uploadMs > 0) await context.globalState.update(rateKey, s.doneOps / (uploadMs / 1000));
         for (const { pool, key } of pools.values()) {
           const ps = pool.stats();
           await context.globalState.update(key, { start: pool.learnedStart(), ceiling: ps.ceiling });

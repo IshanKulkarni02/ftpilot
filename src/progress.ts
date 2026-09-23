@@ -15,13 +15,30 @@ export interface TargetProgress {
   removed: number;
   unchanged: number;
   restarted?: boolean;
+  /** Preview breakdown: files new vs. changed since the last deploy. */
+  newCount?: number;
+  changedCount?: number;
+  /** Compare-with-server: files FTPilot thinks are current but differ/are missing on the server. */
+  driftCount?: number;
+  /** Compare-with-server: files on the server that aren't in the build (never touched). */
+  extraCount?: number;
+  newFiles?: string[];
+  changedFiles?: string[];
+  driftFiles?: string[];
   /** Kept for the report only; stripped before sending to the webview. */
   uploadedFiles: string[];
   removedFiles: string[];
 }
 
 export interface DeployState {
-  kind: "deploy" | "full" | "target";
+  kind: "deploy" | "full" | "target" | "preview";
+  /** Preview only: nothing was uploaded. */
+  dryRun?: boolean;
+  compareRemote?: boolean;
+  /** Target the run was limited to, so "Deploy These Changes" can repeat the same scope. */
+  onlyTargetId?: string;
+  /** Preview: expected upload time from this server's last measured speed. */
+  estimateMs?: number;
   phase: "preparing" | "building" | "comparing" | "uploading" | "done" | "failed";
   startedAt: number;
   finishedAt?: number;
@@ -79,5 +96,5 @@ export class DeployTracker {
 
 /** Snapshot for the webview: everything except the (potentially huge) file lists. */
 export function slimState(s: DeployState): DeployState {
-  return { ...s, targets: s.targets.map((t) => ({ ...t, uploadedFiles: [], removedFiles: [] })) };
+  return { ...s, targets: s.targets.map((t) => ({ ...t, uploadedFiles: [], removedFiles: [], newFiles: [], changedFiles: [], driftFiles: [] })) };
 }

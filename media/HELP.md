@@ -8,6 +8,9 @@ FTPilot builds your project and uploads it over FTP to one or more cPanel domain
 |---|---|
 | **Deploy All Targets** | Builds every target, then uploads what changed. |
 | Cloud icon on a target | Builds and uploads only that target. |
+| **Preview** (or eye icon on a target) | Builds and shows what a deploy *would* upload or remove (new / changed / deleted, size, estimated time). Uploads nothing. |
+| **Compare with server** (on the preview card) | Also lists the server's files to catch edits made outside FTPilot (e.g. FileZilla). Such files aren't resent by a normal deploy; use Full Re-upload. Extra server files are never touched. |
+| **Deploy These Changes** (on the preview card) | Uploads exactly what the preview showed, using the same build (no rebuild). |
 | **Backup** | Downloads every target's remote files into `.ftbdeploy/backups/*.zip`. Changes nothing on the server. |
 | **Full Re-upload** | Uploads every file again, ignoring what changed. |
 | Pulse icon | Tests the FTP login and checks each target's remote folder exists. |

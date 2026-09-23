@@ -80,6 +80,28 @@ export function remoteJoin(remoteDir: string, relPath: string): string {
   return `${remoteDir.replace(/\/+$/, "")}/${normalizedRel}`;
 }
 
+/** Recursively lists regular files under remoteDir as relative path -> size. A missing dir yields an empty map. */
+export async function listRemoteFiles(client: ftp.Client, remoteDir: string): Promise<Map<string, number>> {
+  const out = new Map<string, number>();
+  const base = remoteDir.replace(/\/+$/, "");
+  async function walk(rel: string): Promise<void> {
+    let entries: ftp.FileInfo[];
+    try {
+      entries = await client.list(rel ? `${base}/${rel}` : base || "/");
+    } catch {
+      return; // 550: doesn't exist yet
+    }
+    for (const e of entries) {
+      if (e.name === "." || e.name === "..") continue;
+      const child = rel ? `${rel}/${e.name}` : e.name;
+      if (e.isDirectory) await walk(child);
+      else if (e.isFile) out.set(child, e.size);
+    }
+  }
+  await walk("");
+  return out;
+}
+
 /** Creates each remote directory (and parents) once; call before parallel uploads so connections never race on MKD. */
 export async function ensureDirs(client: ftp.Client, dirs: string[]): Promise<void> {
   const home = await client.pwd();

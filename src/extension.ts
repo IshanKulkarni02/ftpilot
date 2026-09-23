@@ -34,6 +34,15 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.commands.registerCommand("ftpilot.openInEditor", () => panel.openInEditor()),
     vscode.commands.registerCommand("ftpilot.showOutput", () => output.show(true)),
     vscode.commands.registerCommand("ftpilot.cancelDeploy", () => cancelDeploy()),
+    vscode.commands.registerCommand("ftpilot.preview", async (args?: { targetId?: string; compareRemote?: boolean; skipBuild?: boolean }) => {
+      await runDeploy(context, output, statusBar, { dryRun: true, onlyTargetId: args?.targetId, compareRemote: args?.compareRemote, skipBuild: args?.skipBuild, onProgress });
+      panel.refresh();
+    }),
+    // Uploads exactly what the preview showed: same scope, existing build output (no rebuild).
+    vscode.commands.registerCommand("ftpilot.deployPreview", async (args?: { targetId?: string }) => {
+      await runDeploy(context, output, statusBar, { skipBuild: true, onlyTargetId: args?.targetId, onProgress });
+      panel.refresh();
+    }),
     vscode.commands.registerCommand("ftpilot.openHelp", () =>
       vscode.commands.executeCommand("markdown.showPreview", vscode.Uri.joinPath(context.extensionUri, "media", "HELP.md"))
     )

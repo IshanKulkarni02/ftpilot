@@ -60,11 +60,25 @@ export function writeReport(workspaceRoot: string, s: DeployState): string {
   const started = new Date(s.startedAt);
   const file = path.join(reportsDir(workspaceRoot), `deploy-${stampOf(s)}.html`);
   const ok = s.phase === "done";
+  const preview = !!s.dryRun;
   const totals = s.targets.reduce(
     (a, t) => ({ up: a.up + t.uploaded, rm: a.rm + t.removed, same: a.same + t.unchanged }),
     { up: 0, rm: 0, same: 0 }
   );
-  const kindLabel = s.kind === "full" ? "Full re-upload" : s.kind === "target" ? "Single target" : "Deploy all targets";
+  const kindLabel = preview
+    ? `Preview (nothing uploaded)${s.compareRemote ? ", compared with server" : ""}`
+    : s.kind === "full" ? "Full re-upload" : s.kind === "target" ? "Single target" : "Deploy all targets";
+  const pendingBytes = s.totalBytes ?? 0;
+
+  const previewRows = s.targets.map((t) => `
+      <tr>
+        <td><strong>${esc(t.name)}</strong><div class="muted">${esc(t.localDir)} → ${esc(t.remoteDir)}</div></td>
+        <td class="num">${t.newCount ?? 0}</td>
+        <td class="num">${t.changedCount ?? 0}</td>
+        <td class="num">${t.toRemove}</td>
+        <td class="num">${t.unchanged}</td>
+        ${s.compareRemote ? `<td class="num">${t.driftCount ?? 0}</td><td class="num">${t.extraCount ?? 0}</td>` : ""}
+      </tr>`).join("");
 
   const rows = s.targets.map((t) => `
       <tr>
@@ -79,7 +93,11 @@ export function writeReport(workspaceRoot: string, s: DeployState): string {
       </tr>`).join("");
 
   const details = s.targets.map((t) => {
-    const lists = fileList("Uploaded", t.uploadedFiles) + fileList("Removed from server", t.removedFiles);
+    const lists = preview
+      ? fileList("Would upload (new)", t.newFiles ?? []) + fileList("Would upload (changed)", t.changedFiles ?? []) +
+        fileList("Would remove from server", t.removedFiles.length ? t.removedFiles : []) +
+        fileList("Different on server than FTPilot's record", t.driftFiles ?? [])
+      : fileList("Uploaded", t.uploadedFiles) + fileList("Removed from server", t.removedFiles);
     return lists ? `<section class="target"><h3>${esc(t.name)}</h3>${lists}</section>` : "";
   }).join("");
 
@@ -107,14 +125,20 @@ export function writeReport(workspaceRoot: string, s: DeployState): string {
   .hint { margin-top: 32px; } @media print { .hint { display: none; } body { margin: 0; max-width: none; } section.target { break-inside: avoid-page; } }
 </style></head>
 <body>
-  <h1>FTPilot deploy report <span class="badge ${ok ? "ok" : "bad"}">${ok ? "Succeeded" : "Failed"}</span></h1>
+  <h1>FTPilot ${preview ? "deploy preview" : "deploy report"} <span class="badge ${ok ? "ok" : "bad"}">${preview && ok ? "Preview" : ok ? "Succeeded" : s.cancelled ? "Cancelled" : "Failed"}</span></h1>
   <div class="muted">${esc(s.project)} · ${esc(started.toLocaleString())}</div>
-  <div class="stats">
+  ${preview ? `<div class="stats">
+    <div>${s.targets.reduce((n, t) => n + t.toUpload, 0)}<span>to upload</span></div>
+    <div>${s.targets.reduce((n, t) => n + t.toRemove, 0)}<span>to remove</span></div>
+    <div>${totals.same}<span>unchanged</span></div>
+    <div>${(pendingBytes / 1048576).toFixed(2)} MB<span>to send</span></div>
+    <div>${s.estimateMs ? "~" + formatMs(s.estimateMs) : "?"}<span>estimated upload</span></div>
+  </div>` : `<div class="stats">
     <div>${totals.up}<span>files uploaded</span></div>
     <div>${totals.rm}<span>removed</span></div>
     <div>${totals.same}<span>unchanged</span></div>
     <div>${formatMs((s.finishedAt ?? Date.now()) - s.startedAt)}<span>total time</span></div>
-  </div>
+  </div>`}
   <dl>
     <dt>Type</dt><dd>${esc(kindLabel)}</dd>
     <dt>Branch</dt><dd>${esc(s.branch ?? "(not a git repo)")}${s.commit ? ` @ ${esc(s.commit)}` : ""}</dd>
@@ -128,10 +152,14 @@ export function writeReport(workspaceRoot: string, s: DeployState): string {
   </dl>
   ${s.error ? `<h2>Error</h2><div class="error"><strong>${esc(s.error.message)}</strong>${s.error.detail ? `<pre>${esc(s.error.detail)}</pre>` : ""}</div>` : ""}
   <h2>Targets</h2>
-  <table>
+  ${preview ? `<table>
+    <thead><tr><th>Target</th><th class="num">New</th><th class="num">Changed</th><th class="num">Remove</th><th class="num">Unchanged</th>${s.compareRemote ? `<th class="num">Differs on server</th><th class="num">Extra on server</th>` : ""}</tr></thead>
+    <tbody>${previewRows}</tbody>
+  </table>
+  ${s.compareRemote ? `<p class="muted">"Differs on server": FTPilot's record says it's current, but the server copy is missing or a different size (e.g. edited via FileZilla). A normal deploy won't resend these; use Full Re-upload to fix them. "Extra on server" files are never touched.</p>` : `<p class="muted">Compared against FTPilot's record of the last deploy, not the live server.</p>`}` : `<table>
     <thead><tr><th>Target</th><th>Status</th><th>Build</th><th class="num">Uploaded</th><th class="num">Removed</th><th class="num">Unchanged</th><th>Upload time</th><th>Restarted</th></tr></thead>
     <tbody>${rows}</tbody>
-  </table>
+  </table>`}
   ${s.events?.length ? `<h2>Connection events</h2><ul class="events">${s.events.map((e) => `<li><span class="muted">${esc(new Date(e.t).toLocaleTimeString())}</span> ${esc(e.message)}</li>`).join("")}</ul>` : ""}
   ${details ? `<h2>Files</h2>${details}` : ""}
   ${s.logPath ? `<p class="muted">Full log: <a href="${esc(path.basename(s.logPath))}">${esc(path.basename(s.logPath))}</a></p>` : ""}
