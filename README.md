@@ -114,6 +114,14 @@ npm run compile   # or: npm run watch
 
 Press F5 in VS Code to launch an Extension Development Host and test commands there.
 
+## Contributing
+
+Bug reports, feature requests, and PRs are welcome — see [CONTRIBUTING.md](CONTRIBUTING.md) for the workflow (open an issue before starting on anything non-trivial, so effort isn't wasted on something out of scope). Maintained by [@IshanKulkarni02](https://github.com/IshanKulkarni02).
+
 ## Status
 
 Early scaffold — built for a MERN + TypeScript project deployed to Apache/cPanel over plain FTP. Not yet published to the Marketplace; install locally via `npm run package` (produces a `.vsix`) then "Install from VSIX" in VS Code, or just run it via F5 during development.
+
+## License
+
+[MIT](LICENSE)

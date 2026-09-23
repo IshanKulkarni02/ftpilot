@@ -1,0 +1,25 @@
+name: Feature request
+description: Propose a new feature or change before writing code
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem does this solve
+      description: What are you trying to do that FTPilot doesn't support today?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for proposing this before writing code — see [CONTRIBUTING.md](../../CONTRIBUTING.md) for why. Wait for maintainer feedback before starting a PR for anything non-trivial.
