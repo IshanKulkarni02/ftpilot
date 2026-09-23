@@ -50,7 +50,8 @@ export class CancelledError extends Error {
   }
 }
 
-const MAX_ATTEMPTS = 3;
+// Network drops come in bursts; 5 tries on fresh connections rides out a bad patch.
+const MAX_ATTEMPTS = 5;
 
 /** 421, or 530 "too many connections"-style replies: the server's per-IP/per-user cap. */
 export function isLimitError(err: unknown): boolean {
@@ -73,7 +74,12 @@ interface Worker {
   id: number;
   client?: ftp.Client;
   running: boolean;
+  /** Consecutive failed connects while no other connection was working. */
+  connectFailures: number;
 }
+
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+const MAX_SOLO_CONNECT_FAILURES = 3;
 
 /**
  * Runs FTP jobs over several connections and adapts the connection count to the server:
@@ -147,9 +153,16 @@ export class AdaptivePool {
     try {
       await new Promise<void>((resolve, reject) => {
         this.wake = () => {
+          const busy = this.workers.some((w) => w.running);
+          // Never settle while a transfer is still in flight: the caller closes the pool (or
+          // deletes the snapshot folder) as soon as this settles.
+          if (busy) return;
           if (this.fatal) return reject(this.fatal);
-          if (this.opts.isCancelled?.() && !this.workers.some((w) => w.running)) return reject(new CancelledError());
-          if (!this.queue.length && !this.workers.some((w) => w.running)) resolve();
+          if (this.opts.isCancelled?.()) return reject(new CancelledError());
+          if (!this.queue.length) return resolve();
+          // Work left but nobody running (every worker stopped on a connect error): restart.
+          this.fill();
+          if (!this.workers.some((w) => w.running)) reject(new Error("No FTP connection could be kept open to finish the upload."));
         };
         this.fill();
         this.wake();
@@ -167,7 +180,7 @@ export class AdaptivePool {
   }
 
   private addWorker(): Worker {
-    const w: Worker = { id: this.workers.length, running: false };
+    const w: Worker = { id: this.workers.length, running: false, connectFailures: 0 };
     this.workers.push(w);
     return w;
   }
@@ -175,6 +188,7 @@ export class AdaptivePool {
   private async connectWorker(w: Worker): Promise<ftp.Client> {
     const client = await this.opts.connect();
     w.client = client;
+    w.connectFailures = 0;
     this.peak = Math.max(this.peak, this.stats().active);
     this.event("connect", `Connection #${w.id + 1} opened`);
     return client;
@@ -198,7 +212,7 @@ export class AdaptivePool {
           try {
             w.client = await this.connectWorker(w);
           } catch (err) {
-            if (this.handleConnectError(w, err)) return;
+            if (await this.handleConnectError(w, err)) return;
             continue;
           }
         }
@@ -215,29 +229,46 @@ export class AdaptivePool {
       }
     } finally {
       w.running = false;
+      // A worker parked by a scale-down must not keep holding one of the server's connection
+      // slots (it would count toward the per-IP limit and time out server-side anyway).
+      if (w.id >= this.desired && w.client) {
+        w.client.close();
+        w.client = undefined;
+      }
       this.wake?.();
     }
   }
 
-  /** Returns true when this worker should stop. */
-  private handleConnectError(w: Worker, err: unknown): boolean {
-    const others = this.workers.filter((o) => o !== w && o.client).length;
-    if (isLimitError(err) && others > 0) {
-      // The server just told us its cap: that's the number already connected.
-      this.ceiling = others;
-      this.desired = Math.min(this.desired, others);
+  /** Returns true when this worker should stop; false to try connecting again. */
+  private async handleConnectError(w: Worker, err: unknown): Promise<boolean> {
+    const msg = (err as Error).message.trim();
+    // Only connections actively working count: they will carry on with the queue.
+    const working = this.workers.filter((o) => o !== w && o.running && o.client).length;
+    if (working > 0) {
+      if (isLimitError(err)) {
+        // The server just told us its cap: that's the number already working.
+        this.ceiling = working;
+        this.event("limit", `Server refused connection #${w.id + 1} (${msg}); limiting to ${working}`);
+      } else {
+        this.event("scale-down", `Couldn't open connection #${w.id + 1} (${msg}); using ${working}`);
+      }
+      this.desired = Math.max(1, Math.min(this.desired, working));
       this.ramping = false;
-      this.event("limit", `Server refused connection #${w.id + 1} (${(err as Error).message.trim()}); limiting to ${others}`);
       return true;
     }
-    if (others === 0) {
-      this.fatal = err; // can't connect at all: surface the real error
+    // Nobody else is working, so this worker must carry on or the run can't finish.
+    w.connectFailures++;
+    if (w.connectFailures >= MAX_SOLO_CONNECT_FAILURES) {
+      this.fatal = err; // surface the real error (wrong password, host down, ...)
       return true;
     }
-    this.desired = Math.max(1, this.desired - 1);
-    this.ramping = false;
-    this.event("scale-down", `Couldn't open connection #${w.id + 1} (${(err as Error).message}); using ${this.desired}`);
-    return true;
+    if (!isLimitError(err) && !isTransientError(err)) {
+      this.fatal = err; // e.g. 530 wrong password: retrying won't help
+      return true;
+    }
+    this.event("reconnect", `Couldn't connect (${msg}); retrying in 2s (${w.connectFailures}/${MAX_SOLO_CONNECT_FAILURES})`);
+    await sleep(2000);
+    return false;
   }
 
   private handleJobError(w: Worker, job: Job, err: unknown): void {

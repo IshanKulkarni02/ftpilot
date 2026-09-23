@@ -5,12 +5,12 @@ import { loadConfig, manifestPath, updateTargetLocalDir, DeployTarget, DeployCon
 import { getCredentials } from "./secrets";
 import { getCurrentBranch, checkoutBranch, getShortCommit } from "./git";
 import { runBuild, validateEnvSecrets, BuildError, LogSink } from "./build";
-import { loadManifest, saveManifest, hashTarget, diffTarget, walkDir, globMatcher, Manifest } from "./manifest";
+import { loadManifest, saveManifest, hashFiles, diffTarget, walkDir, globMatcher, Manifest } from "./manifest";
 import { DeployState, DeployTracker, TargetProgress } from "./progress";
 import { AdaptivePool, CancelledError, Job } from "./parallel";
 import { checkHealth } from "./health";
 import { Metrics } from "./metrics";
-import { RollbackInfo, beginSnapshot, saveSnapshot, pruneSnapshots, savedFile, snapshotDir, loadSnapshot, restoreManifest } from "./rollback";
+import { RollbackInfo, beginSnapshot, saveSnapshot, pruneSnapshots, savedFile, snapshotDir, loadSnapshot, restoreManifest, recordDeploy, recordRollback, rollbackableId } from "./rollback";
 import { writeReport, writeLog, formatMs } from "./report";
 import { snapshotTopLevelDirs, diffTopLevelDirs } from "./detect";
 import * as ftpClient from "./ftpClient";
@@ -76,12 +76,13 @@ async function openPool(
   }
   const maxConnections = Math.max(1, Math.min(10, config.maxConnections ?? DEFAULT_MAX_CONNECTIONS));
   const key = `ftpilot.connections:${config.host}:${config.port}:${creds.user}`;
-  const learned = context.globalState.get<{ start: number; ceiling?: number }>(key);
+  // Only the starting count is remembered. A limit seen last time is not a cap now: it may have
+  // been caused by another client (FileZilla, the panel's Connect) and is re-learned if real.
+  const learned = context.globalState.get<{ start: number }>(key);
   const pool = new AdaptivePool({
     connect: () => ftpClient.connect(config, creds),
     start: learned?.start ?? 2,
     max: maxConnections,
-    ceiling: learned?.ceiling,
     isCancelled: () => cancelRequested,
     onJobDone: (job, ms, worker) => { if (job.meta) metrics?.file({ ...job.meta, bytes: job.bytes, worker }, ms); },
     onEvent: (e) => {
@@ -96,7 +97,6 @@ async function openPool(
   return entry;
 }
 
-/** Mirrors pool stats into the progress state once a second; returns a stop function. */
 /** Samples overall progress once a second for the time-series charts; returns a stop function. */
 function sampleEverySecond(tracker: DeployTracker): () => void {
   const m = tracker.metrics;
@@ -108,6 +108,7 @@ function sampleEverySecond(tracker: DeployTracker): () => void {
   return () => { clearInterval(timer); take(); m.endPhase(); };
 }
 
+/** Mirrors pool stats into the progress state once a second; returns a stop function. */
 function trackPool(pool: AdaptivePool, tracker: DeployTracker): () => void {
   const sync = () => tracker.update((st) => {
     const ps = pool.stats();
@@ -118,6 +119,47 @@ function trackPool(pool: AdaptivePool, tracker: DeployTracker): () => void {
   });
   const timer = setInterval(sync, 1000);
   return () => { clearInterval(timer); sync(); };
+}
+
+/**
+ * Tees output into the per-run log file buffer, and batches Output-channel writes (~5/s):
+ * a per-file line from several parallel connections would otherwise be hundreds of
+ * extension-host -> UI messages a second.
+ */
+function createRunLog(output: vscode.OutputChannel): { log: LogSink; lines: string[]; flush: () => void } {
+  const lines: string[] = [];
+  let pending = "";
+  let timer: NodeJS.Timeout | undefined;
+  const flush = () => {
+    clearTimeout(timer);
+    timer = undefined;
+    if (pending) output.append(pending);
+    pending = "";
+  };
+  const write = (v: string) => {
+    lines.push(v);
+    pending += v;
+    if (!timer) timer = setTimeout(flush, 200);
+  };
+  return { log: { append: write, appendLine: (v) => write(v + "\n") }, lines, flush };
+}
+
+/** Rate-limits progress notification + status bar text (the last message always lands). */
+function throttledSay(report: (message: string) => void, statusBar: vscode.StatusBarItem): (message: string) => void {
+  let last = 0;
+  let pending: string | undefined;
+  let timer: NodeJS.Timeout | undefined;
+  const emit = (message: string) => {
+    last = Date.now();
+    pending = undefined;
+    report(message);
+    statusBar.text = `$(sync~spin) FTPilot: ${message}`;
+  };
+  return (message: string) => {
+    if (Date.now() - last >= 150) return emit(message);
+    pending = message;
+    if (!timer) timer = setTimeout(() => { timer = undefined; if (pending) emit(pending); }, 150);
+  };
 }
 
 function runId(): string {
@@ -248,12 +290,7 @@ async function runDeployInner(
   const s = tracker.state;
   const m = tracker.metrics!;
 
-  // Tee everything written to the Output channel into a per-run log file.
-  const logLines: string[] = [];
-  const log: LogSink = {
-    append: (v: string) => { output.append(v); logLines.push(v); },
-    appendLine: (v: string) => { output.appendLine(v); logLines.push(v + "\n"); },
-  };
+  const { log, lines: logLines, flush: flushLog } = createRunLog(output);
 
   output.clear();
   log.appendLine(`FTPilot ${kind} — ${new Date(s.startedAt).toLocaleString()} — ${s.project} @ ${s.branch ?? "?"}${s.commit ? ` (${s.commit})` : ""}`);
@@ -262,12 +299,11 @@ async function runDeployInner(
     { location: vscode.ProgressLocation.Notification, title: "FTPilot", cancellable: true },
     async (vsProgress, token) => {
       let lastPct = 0;
-      const say = (message: string) => {
+      const say = throttledSay((message) => {
         const pct = s.totalOps ? Math.floor((s.doneOps / s.totalOps) * 100) : 0;
         vsProgress.report({ message, increment: Math.max(0, pct - lastPct) });
         lastPct = Math.max(lastPct, pct);
-        statusBar.text = `$(sync~spin) FTPilot: ${message}`;
-      };
+      }, statusBar);
 
       // One adaptive pool per FTP account, reused across that account's targets.
       const pools = new Map<string, PoolEntry>();
@@ -377,17 +413,22 @@ async function runDeployInner(
         say("Comparing files…");
         m.phase("compare");
         const newManifest: Manifest = {};
-        for (const target of config.targets) {
-          Object.assign(newManifest, hashTarget(target.name, path.join(workspaceRoot, target.localDir), exclude));
-        }
         const mPath = manifestPath(workspaceRoot);
         const oldManifest = options.forceFull ? {} : loadManifest(mPath);
         let excludedCount = 0;
+        const sizes = new Map<string, number>(); // absolute path -> bytes, reused by upload jobs
         const plans = config.targets.map((target) => {
           const localDir = path.join(workspaceRoot, target.localDir);
-          const all = walkDir(localDir, exclude);
-          excludedCount += walkDir(localDir).length - all.length;
+          // One walk per target: exclusion count, hashes and sizes all come from it.
+          const everything = walkDir(localDir);
+          const all = everything.filter((rel) => !exclude(rel));
+          excludedCount += everything.length - all.length;
+          Object.assign(newManifest, hashFiles(target.name, localDir, all));
+          for (const rel of all) sizes.set(path.join(localDir, rel), fileSize(path.join(localDir, rel)));
           const diff = useFull ? { toUpload: all, toRemove: [] as string[] } : diffTarget(target.name, oldManifest, newManifest);
+          // Excluded files are unmanaged, never deleted: adding "*.map" to Exclude must not wipe
+          // maps an earlier deploy uploaded.
+          diff.toRemove = diff.toRemove.filter((rel) => !exclude(rel));
           const tp = tracker.target(target.name)!;
           tp.toUpload = diff.toUpload.length;
           tp.toRemove = diff.toRemove.length;
@@ -401,7 +442,7 @@ async function runDeployInner(
         if (excludedCount) log.appendLine(`Skipping ${excludedCount} file(s) matching exclude patterns: ${(config.exclude ?? DEFAULT_EXCLUDE).join(", ")}`);
         tracker.update((st) => {
           st.totalOps = plans.reduce((n, p) => n + p.toUpload.length + p.toRemove.length, 0);
-          st.totalBytes = plans.reduce((n, p) => n + p.toUpload.reduce((b, rel) => b + fileSize(path.join(p.localDir, rel)), 0), 0);
+          st.totalBytes = plans.reduce((n, p) => n + p.toUpload.reduce((b, rel) => b + (sizes.get(path.join(p.localDir, rel)) ?? 0), 0), 0);
           st.maxConnections = maxConnections;
         });
 
@@ -524,7 +565,7 @@ async function runDeployInner(
             }
 
             const uploadJob = (rel: string): Job => {
-              const bytes = fileSize(path.join(localDir, rel));
+              const bytes = sizes.get(path.join(localDir, rel)) ?? 0;
               return {
                 label: rel,
                 bytes,
@@ -593,8 +634,7 @@ async function runDeployInner(
         const uploadMs = s.targets.reduce((n, t) => n + (t.uploadMs ?? 0), 0);
         if (s.doneOps > 20 && uploadMs > 0) await context.globalState.update(rateKey, s.doneOps / (uploadMs / 1000));
         for (const { pool, key } of pools.values()) {
-          const ps = pool.stats();
-          await context.globalState.update(key, { start: pool.learnedStart(), ceiling: ps.ceiling });
+          await context.globalState.update(key, { start: pool.learnedStart() });
         }
 
         // A single-target deploy must keep the other targets' manifest entries, or their
@@ -606,6 +646,7 @@ async function runDeployInner(
           }
         }
         saveManifest(mPath, newManifest);
+        if (s.doneOps > 0) recordDeploy(workspaceRoot, s.rollbackId ?? null);
 
         tracker.update((st) => { st.phase = "done"; st.finishedAt = Date.now(); st.currentTarget = undefined; st.currentFile = undefined; });
         const up = s.targets.reduce((n, t) => n + t.uploaded, 0);
@@ -625,6 +666,8 @@ async function runDeployInner(
         const message = (err as Error).message;
         const detail = err instanceof BuildError ? err.detail : undefined;
         log.appendLine(`\nERROR: ${message}`);
+        // A partial deploy still changed the server, so it's the one a rollback must undo next.
+        if (s.doneOps > 0) recordDeploy(workspaceRoot, s.rollbackId ?? null);
         // Build failures already have their output above; a stack trace only helps for FTPilot/FTP errors.
         if (!detail && (err as Error).stack) log.appendLine((err as Error).stack!);
         tracker.update((st) => {
@@ -644,10 +687,12 @@ async function runDeployInner(
         return { ok: false, message };
       } finally {
         stopSampling();
+        flushLog();
         tracker.emitNow();
         for (const { pool } of pools.values()) pool.close();
         killBuild = undefined;
-        statusBar.text = "$(cloud-upload) Deploy";
+        // After any throttled "say" timer, so the spinner text doesn't come back.
+        setTimeout(() => { statusBar.text = "$(cloud-upload) Deploy"; }, 200);
       }
     }
   );
@@ -686,6 +731,7 @@ export async function runRollback(
   const problem = !info ? "That rollback copy no longer exists (only the last 3 are kept)."
     : !info.complete ? "That rollback copy is incomplete and can't be used."
     : info.rolledBackAt ? "That deploy was already rolled back."
+    : rollbackableId(workspaceRoot) !== info.id ? "Only the most recent deploy can be rolled back. Roll back newer deploys first."
     : undefined;
   if (problem || !info) {
     void vscode.window.showErrorMessage(`FTPilot: ${problem}`);
@@ -724,11 +770,7 @@ export async function runRollback(
     );
     const s = tracker.state;
     const m = tracker.metrics!;
-    const logLines: string[] = [];
-    const log: LogSink = {
-      append: (v: string) => { output.append(v); logLines.push(v); },
-      appendLine: (v: string) => { output.appendLine(v); logLines.push(v + "\n"); },
-    };
+    const { log, lines: logLines, flush: flushLog } = createRunLog(output);
     output.clear();
     log.appendLine(`FTPilot rollback — ${new Date().toLocaleString()} — undoing deploy of ${new Date(info.createdAt).toLocaleString()}${info.commit ? ` (${info.commit})` : ""}`);
 
@@ -737,7 +779,7 @@ export async function runRollback(
       async (vsProgress, token) => {
         token.onCancellationRequested(() => { cancelRequested = true; });
         const stopSampling = sampleEverySecond(tracker);
-        const say = (message: string) => { vsProgress.report({ message }); statusBar.text = `$(sync~spin) FTPilot: ${message}`; };
+        const say = throttledSay((message) => vsProgress.report({ message }), statusBar);
         const pools = new Map<string, PoolEntry>();
         try {
           for (const [i, rt] of info.targets.entries()) {
@@ -785,6 +827,7 @@ export async function runRollback(
           restoreManifest(workspaceRoot, info.id);
           info.rolledBackAt = Date.now();
           saveSnapshot(workspaceRoot, info);
+          recordRollback(workspaceRoot, info.id);
 
           const checks = info.targets.map((rt, i) => ({ rt, tp: s.targets[i] })).filter(({ rt }) => rt.healthUrl);
           if (checks.length) {
@@ -810,6 +853,7 @@ export async function runRollback(
           const cancelled = err instanceof CancelledError;
           const message = (err as Error).message;
           log.appendLine(`\nERROR: ${message}`);
+          if (!cancelled && (err as Error).stack) log.appendLine((err as Error).stack!);
           tracker.update((st) => {
             st.phase = "failed"; st.finishedAt = Date.now(); st.error = { message: cancelled ? message : `Rollback incomplete: ${message}. You can run Roll Back again.` }; st.cancelled = cancelled;
             const current = st.targets.find((t) => t.name === st.currentTarget && t.status !== "done");
@@ -820,9 +864,10 @@ export async function runRollback(
           return { ok: false, message };
         } finally {
           stopSampling();
+          flushLog();
           tracker.emitNow();
           for (const { pool } of pools.values()) pool.close();
-          statusBar.text = "$(cloud-upload) Deploy";
+          setTimeout(() => { statusBar.text = "$(cloud-upload) Deploy"; }, 200);
         }
       }
     );

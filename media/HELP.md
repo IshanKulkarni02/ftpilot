@@ -22,8 +22,9 @@ The branch row shows a check when you are on the deploy branch, and a warning wh
 ## Roll back
 
 - Before uploading, FTPilot saves the server's current copy of every file the deploy will overwrite or delete (setting: **Save a rollback copy before each deploy**, on by default).
+- Only the **most recent** deploy can be rolled back (then the one before it, and so on); undoing an older deploy while a newer one is live would break the site.
 - **Roll Back This Deploy** appears on the finished card (success, failed health check, or a deploy that failed mid-upload). It puts those files back, deletes files the deploy created, restarts Node apps, restores FTPilot's upload record, and runs health checks.
-- Older deploys: Command Palette → **FTPilot: Roll Back a Deploy…** (last 3 kept, in `.ftbdeploy/rollback/`, gitignored).
+- Also available from the Command Palette → **FTPilot: Roll Back a Deploy…** (copies kept for the last 3 deploys, in `.ftbdeploy/rollback/`, gitignored).
 - If a file exists on the server but can't be downloaded, the deploy stops *before uploading anything*, so a rollback can never delete a file it didn't create.
 - Database changes are not undone.
 
@@ -36,7 +37,7 @@ Open it with the gear icon. Changes are kept as a draft until you **Save Configu
 | **Deploy Branch** | Deploys are meant to run from this branch only. |
 | **Deployment Strategy** | *Incremental* uploads changed files and deletes files FTPilot uploaded earlier that no longer exist. *Full* overwrites everything and never deletes. |
 | **Max Parallel Connections** | Upper limit for simultaneous uploads (1–10, default 8). FTPilot starts at 2, adds connections while it keeps getting faster, backs off if the server refuses, and remembers the best number per server. |
-| **Exclude Patterns** | Files never uploaded, e.g. `*.map, *.d.ts` (the default). A pattern without `/` matches at any depth. |
+| **Exclude Patterns** | Files never uploaded, e.g. `*.map, *.d.ts` (the default). A pattern without `/` matches at any depth. Copies already on the server are left alone, never deleted. |
 | **Working Directory** | Folder where the build command runs, e.g. `apps/web`. |
 | **Build Command** | e.g. `npm run build`. Leave blank if there is no build step. |
 | **Build Output Directory** | Folder whose contents get uploaded, e.g. `apps/web/out`. |

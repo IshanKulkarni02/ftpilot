@@ -6,6 +6,7 @@ import * as ftp from "basic-ftp";
 import { setCredentials, setEnvSecret, getCredentials, getEnvSecret, getLoginStatus } from "./secrets";
 import { getCurrentBranch } from "./git";
 import { DeployState, slimState } from "./progress";
+import { rollbackableId } from "./rollback";
 import { checkHealth, HealthResult } from "./health";
 import * as ftpClient from "./ftpClient";
 import { detectProject } from "./detect";
@@ -77,6 +78,8 @@ type InitMeta = {
   envSecretsSet: Record<string, string[]>;
   /** Geek Mode setting: when off, no dashboard entry points are shown. */
   geekMode: boolean;
+  /** Snapshot id of the one deploy that can be rolled back now (the most recent), if any. */
+  rollbackable?: string;
 };
 
 type ConnState = {
@@ -232,6 +235,7 @@ export class FtpilotPanel implements vscode.WebviewViewProvider {
       targetLogins,
       envSecretsSet,
       geekMode: vscode.workspace.getConfiguration("ftpilot").get<boolean>("geekMode", false),
+      rollbackable: rollbackableId(root),
     };
   }
 
@@ -923,7 +927,9 @@ window.addEventListener("message", (e) => {
     hasDraft = !!msg.draft;
     cfg = MODE === "config" && msg.draft ? msg.draft : disk;
     lastSentDraft = JSON.stringify(cfg);
-    view = "form";
+    // Deliberately not resetting the view: init also arrives on visibility changes and config-file
+    // writes, and must not yank the user out of a confirm screen. Flows that finish (save,
+    // deploy, rollback) already return to the form themselves.
     // A "busy..." notice is stale once fresh state arrives.
     if (lastStatus && lastStatus.kind === "busy") lastStatus = null;
     // Index-keyed toggles would leak onto other targets after a reload; reset them.
@@ -1265,7 +1271,7 @@ function progressCard() {
   ]) : null;
 
   // Offered after success, a failed health check, or a failure mid-upload (partial deploy).
-  const canRollBack = !running && !rb && !p.dryRun && p.rollbackId && !(p.cancelled && !p.doneOps) && !(p.phase === "failed" && !p.doneOps);
+  const canRollBack = !running && !rb && !p.dryRun && p.rollbackId && meta && meta.rollbackable === p.rollbackId;
   const rollbackBtn = canRollBack ? el("div", { class: "pc-actions" }, [
     el("button", { class: p.healthFailed || p.phase === "failed" ? "block" : "secondary block", onclick: () => { pendingRollback = p.rollbackId; view = "confirmRollback"; render(); } }, [ic("discard"), "Roll Back This Deploy"]),
   ]) : null;
@@ -1651,7 +1657,7 @@ function renderConfig(root) {
       }),
       labeledInput("Exclude Patterns", cfg.exclude.join(", "), (v) => { cfg.exclude = v.split(",").map((p) => p.trim()).filter(Boolean); }, {
         placeholder: "*.map, *.d.ts",
-        info: "Comma-separated globs, relative to each Build Output Directory. A pattern without / matches at any depth. Excluded files are never uploaded, and in Incremental mode copies FTPilot uploaded earlier are removed from the server.",
+        info: "Comma-separated globs, relative to each Build Output Directory. A pattern without / matches at any depth. Excluded files are never uploaded or deleted: copies already on the server are left alone.",
         help: "Files never uploaded. Source maps and type declarations aren't needed to run the site.",
       }),
     ]),

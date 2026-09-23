@@ -2,21 +2,14 @@ import * as fs from "fs";
 import * as path from "path";
 import { configDir } from "./config";
 import { DeployState } from "./progress";
+import { esc, formatMs } from "./format";
 import { Metrics } from "./metrics";
 import { dashboardSections } from "./dashboard";
 import { CHART_CSS } from "./charts";
 
 const MAX_FILES_LISTED = 2000;
 
-function esc(s: unknown): string {
-  return String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c] as string);
-}
-
-export function formatMs(ms?: number): string {
-  if (ms === undefined) return "-";
-  const s = Math.round(ms / 1000);
-  return s < 60 ? `${s}s` : `${Math.floor(s / 60)}m ${s % 60}s`;
-}
+export { formatMs };
 
 function uploadSpeed(s: DeployState): string {
   const ms = s.targets.reduce((n, t) => n + (t.uploadMs ?? 0), 0);

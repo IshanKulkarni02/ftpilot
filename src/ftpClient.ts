@@ -29,6 +29,8 @@ export interface TlsDiagnosis {
   certIssue: boolean;
   /** Server doesn't offer FTPS at all. */
   unsupported?: boolean;
+  /** Server refuses plain FTP. */
+  requiresTls?: boolean;
   /** A hostname the certificate *is* valid for, when that can be read from it. */
   suggestedHost?: string;
 }
@@ -46,8 +48,17 @@ const CERT_CODES = new Set([
 export function diagnoseTlsError(err: unknown): TlsDiagnosis | undefined {
   const e = err as { code?: string | number; message?: string; cert?: { subjectaltname?: string; subject?: { CN?: string } } };
   const msg = e?.message ?? "";
-  if (typeof e?.code === "number" && e.code >= 500 && /AUTH|TLS|SSL/i.test(msg)) {
-    return { message: `This server doesn't offer FTPS (${msg.trim()}).`, certIssue: false, unsupported: true };
+  if (typeof e?.code === "number") {
+    // Server insists on encryption (reply to a plain login). "530 Login authentication failed"
+    // is just a wrong password and must NOT land here.
+    if ((e.code === 530 || e.code === 534) && /\b(TLS|SSL|encrypt\w*|secure)\b/i.test(msg)) {
+      return { message: `This server requires encryption (${msg.trim()}). Set Protocol to FTPS.`, certIssue: false, requiresTls: true };
+    }
+    // Reply to AUTH TLS itself: the command isn't supported.
+    if ([500, 502, 504].includes(e.code) && /AUTH|TLS|SSL|security|not (understood|implemented|supported)/i.test(msg)) {
+      return { message: `This server doesn't offer FTPS (${msg.trim()}).`, certIssue: false, unsupported: true };
+    }
+    return undefined;
   }
   const code = typeof e?.code === "string" ? e.code : "";
   if (!CERT_CODES.has(code) && !/certificate|altnames|self[- ]signed/i.test(msg)) return undefined;
@@ -80,7 +91,12 @@ export function remoteJoin(remoteDir: string, relPath: string): string {
   return `${remoteDir.replace(/\/+$/, "")}/${normalizedRel}`;
 }
 
-/** Recursively lists regular files under remoteDir as relative path -> size. A missing dir yields an empty map. */
+/**
+ * Recursively lists everything under remoteDir that isn't a directory (files and symlinks) as
+ * relative path -> size. Only a missing *top* folder (550) counts as empty; any other listing
+ * failure throws, because callers (the rollback snapshot) treat "not listed" as "doesn't exist",
+ * and a silently skipped subfolder would make a rollback delete real files.
+ */
 export async function listRemoteFiles(client: ftp.Client, remoteDir: string): Promise<Map<string, number>> {
   const out = new Map<string, number>();
   const base = remoteDir.replace(/\/+$/, "");
@@ -88,14 +104,15 @@ export async function listRemoteFiles(client: ftp.Client, remoteDir: string): Pr
     let entries: ftp.FileInfo[];
     try {
       entries = await client.list(rel ? `${base}/${rel}` : base || "/");
-    } catch {
-      return; // 550: doesn't exist yet
+    } catch (err) {
+      if (!rel && (err as { code?: unknown }).code === 550) return; // target folder not created yet
+      throw new Error(`couldn't list ${rel ? `${base}/${rel}` : base || "/"} on the server: ${(err as Error).message.trim()}`);
     }
     for (const e of entries) {
       if (e.name === "." || e.name === "..") continue;
       const child = rel ? `${rel}/${e.name}` : e.name;
       if (e.isDirectory) await walk(child);
-      else if (e.isFile) out.set(child, e.size);
+      else out.set(child, e.size); // files, symlinks, anything else: it exists
     }
   }
   await walk("");
@@ -119,8 +136,11 @@ export async function removeOne(
   const remotePath = remoteJoin(remoteDir, relPath);
   try {
     await client.remove(remotePath);
-  } catch {
-    // already gone / never existed remotely — fine
+  } catch (err) {
+    // Only "not there" is fine. A dropped connection must reach the pool (to retry on a fresh
+    // one) and a permission error must fail loudly, not be counted as removed.
+    if ((err as { code?: unknown }).code === 550 && !/permission|denied|not allowed|privilege/i.test((err as Error).message)) return;
+    throw err;
   }
 }
 

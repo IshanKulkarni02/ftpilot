@@ -2,10 +2,9 @@ import * as vscode from "vscode";
 import * as path from "path";
 import { DeployState } from "./progress";
 import { Metrics, FileRec } from "./metrics";
-import { gauge, timeSeries, lanes, sizeVsTime, timeHistogram, phaseTimeline, rates, percentile, fmtMs, fmtBytes, CHART_CSS } from "./charts";
+import { gauge, timeSeries, lanes, sizeVsTime, timeHistogram, phaseTimeline, rates, percentile, CHART_CSS } from "./charts";
 
-const esc = (s: unknown) =>
-  String(s ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c] as string);
+import { esc, formatMs as fmtMs, formatBytes as fmtBytes } from "./format";
 
 function table(head: string[], rows: string[][], numericFrom = 1): string {
   if (!rows.length) return `<p class="muted">Nothing yet.</p>`;
@@ -234,14 +233,19 @@ export class Dashboard implements vscode.Disposable {
   ${box("build", "Build output (tail)")}
 </div>
 <script nonce="${nonce}">
+  // Cheap fingerprint of the last HTML per section (not a second full copy of it in the DOM).
+  const seen = {};
+  function hash(s) { let h = 5381; for (let i = 0; i < s.length; i++) h = ((h << 5) + h + s.charCodeAt(i)) | 0; return s.length + ":" + h; }
   window.addEventListener("message", (e) => {
     if (e.data.type !== "sections") return;
     for (const [id, html] of Object.entries(e.data.sections)) {
       const el = document.querySelector('[data-s="' + id + '"]');
-      if (!el || el.dataset.html === html) continue;
+      const sig = hash(html);
+      if (!el || seen[id] === sig) continue;
+      seen[id] = sig;
       // Keep scroll position of scrollable panes across updates.
       const sc = el.querySelector("pre, ul.events"), top = sc ? sc.scrollTop : 0;
-      el.innerHTML = html; el.dataset.html = html;
+      el.innerHTML = html;
       const sc2 = el.querySelector("pre, ul.events"); if (sc2) sc2.scrollTop = id === "build" ? sc2.scrollHeight : top;
     }
   });

@@ -98,3 +98,48 @@ export function pruneSnapshots(workspaceRoot: string): void {
     fs.rmSync(snapshotDir(workspaceRoot, info.id), { recursive: true, force: true });
   }
 }
+
+/*
+ * Rollback order. Undoing an older deploy while a newer one is live would delete files the
+ * newer deploy relies on and revert the manifest underneath it, so only the most recent deploy
+ * that changed the server can be rolled back; after that, the one before it, and so on.
+ * stack.json lists deploys that uploaded/deleted anything, oldest first; null = no snapshot
+ * (snapshots were off), which blocks rolling back past it.
+ */
+const MAX_STACK = 20;
+
+function stackFile(workspaceRoot: string): string {
+  return path.join(rollbackRoot(workspaceRoot), "stack.json");
+}
+
+function readStack(workspaceRoot: string): (string | null)[] {
+  try {
+    const v = JSON.parse(fs.readFileSync(stackFile(workspaceRoot), "utf8"));
+    return Array.isArray(v) ? v : [];
+  } catch {
+    return [];
+  }
+}
+
+function writeStack(workspaceRoot: string, stack: (string | null)[]): void {
+  fs.writeFileSync(stackFile(workspaceRoot), JSON.stringify(stack.slice(-MAX_STACK)), "utf8");
+}
+
+/** Record a deploy that changed the server (with its snapshot id, or null if none was taken). */
+export function recordDeploy(workspaceRoot: string, snapshotId: string | null): void {
+  writeStack(workspaceRoot, [...readStack(workspaceRoot), snapshotId]);
+}
+
+/** The only snapshot that may be rolled back right now, if any. */
+export function rollbackableId(workspaceRoot: string): string | undefined {
+  const top = readStack(workspaceRoot).at(-1);
+  if (!top) return undefined;
+  const info = loadSnapshot(workspaceRoot, top);
+  return info?.complete && !info.rolledBackAt ? top : undefined;
+}
+
+/** After a successful rollback, the previous deploy becomes the one that can be undone. */
+export function recordRollback(workspaceRoot: string, snapshotId: string): void {
+  const stack = readStack(workspaceRoot);
+  if (stack.at(-1) === snapshotId) writeStack(workspaceRoot, stack.slice(0, -1));
+}

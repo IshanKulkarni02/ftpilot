@@ -72,8 +72,13 @@ export function walkDir(dir: string, exclude?: (relPath: string) => boolean): st
 
 /** Builds a manifest subset for one target by hashing every file under its local build dir. */
 export function hashTarget(targetName: string, localDir: string, exclude?: (relPath: string) => boolean): Manifest {
+  return hashFiles(targetName, localDir, walkDir(localDir, exclude));
+}
+
+/** Like hashTarget, for a file list the caller already walked. */
+export function hashFiles(targetName: string, localDir: string, relPaths: string[]): Manifest {
   const manifest: Manifest = {};
-  for (const relPath of walkDir(localDir, exclude)) {
+  for (const relPath of relPaths) {
     const key = `${targetName}/${relPath}`;
     manifest[key] = hashFile(path.join(localDir, relPath));
   }

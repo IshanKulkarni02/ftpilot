@@ -1,6 +1,6 @@
 import * as vscode from "vscode";
 import { runDeploy, cancelDeploy, runRollback } from "./deploy";
-import { listSnapshots } from "./rollback";
+import { listSnapshots, rollbackableId } from "./rollback";
 import { DeployState } from "./progress";
 import { Dashboard } from "./dashboard";
 import { Metrics } from "./metrics";
@@ -56,9 +56,11 @@ export function activate(context: vscode.ExtensionContext): void {
       if (!root) return;
       let id = args?.snapshotId;
       if (!id) {
-        const usable = listSnapshots(root).filter((i) => i.complete && !i.rolledBackAt);
+        // Only the most recent deploy can be undone (then the one before it, and so on).
+        const nextId = rollbackableId(root);
+        const usable = listSnapshots(root).filter((i) => i.id === nextId);
         if (!usable.length) {
-          void vscode.window.showInformationMessage("FTPilot: no deploy to roll back. Rollback copies are saved before each deploy (last 3 kept).");
+          void vscode.window.showInformationMessage("FTPilot: nothing to roll back. Only the most recent deploy can be rolled back, and only if a rollback copy was saved before it.");
           return;
         }
         const pick = await vscode.window.showQuickPick(
@@ -68,7 +70,7 @@ export function activate(context: vscode.ExtensionContext): void {
             detail: i.targets.map((t) => `${t.name}: ${t.restore.length} to restore, ${t.created.length} to delete`).join(" · "),
             id: i.id,
           })),
-          { placeHolder: "Roll back which deploy? (newest first)" }
+          { placeHolder: "Roll back the most recent deploy" }
         );
         if (!pick) return;
         id = pick.id;

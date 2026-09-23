@@ -7,20 +7,7 @@
  */
 import type { FileRec, PhaseRec, Sample } from "./metrics";
 
-const esc = (s: unknown) =>
-  String(s ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c] as string);
-
-export function fmtMs(ms: number): string {
-  if (ms < 1000) return `${Math.round(ms)} ms`;
-  const s = ms / 1000;
-  return s < 60 ? `${s < 10 ? s.toFixed(1) : Math.round(s)}s` : `${Math.floor(s / 60)}m ${Math.round(s % 60)}s`;
-}
-
-export function fmtBytes(n: number): string {
-  if (n < 1024) return `${Math.round(n)} B`;
-  if (n < 1048576) return `${(n / 1024).toFixed(n < 10240 ? 1 : 0)} KB`;
-  return `${(n / 1048576).toFixed(1)} MB`;
-}
+import { esc, formatMs as fmtMs, formatBytes as fmtBytes } from "./format";
 
 function fmtNum(n: number): string {
   if (Math.abs(n) >= 1000) return `${(n / 1000).toFixed(n >= 10000 ? 0 : 1)}K`;
@@ -173,11 +160,28 @@ export function lanes(files: FileRec[], xMax: number, w = 560): string {
   const x = (t: number) => PAD.l + ((w - PAD.l - PAD.r) * t) / Math.max(1, xMax);
   const rows = Array.from({ length: workers }, (_, i) =>
     `<text x="${PAD.l - 6}" y="${PAD.t + i * (row + gap) + row - 3}" text-anchor="end" class="tick">#${i + 1}</text>`).join("");
-  const rects = files.map((f) => {
-    const x0 = x(f.t0);
-    // 1px gap keeps back-to-back files distinguishable.
-    const wd = Math.max(1, x(f.t1) - x0 - 1);
-    return `<rect x="${x0.toFixed(1)}" y="${PAD.t + f.worker * (row + gap)}" width="${wd.toFixed(1)}" height="${row}" fill="${KIND_COLOR[f.kind]}"><title>${esc(KIND_LABEL[f.kind])} ${esc(f.rel)} · ${esc(fmtBytes(f.bytes))} · ${esc(fmtMs(f.t1 - f.t0))} · connection #${f.worker + 1}</title></rect>`;
+  // Files narrower than ~2px can't be told apart anyway: merge touching same-kind transfers on a
+  // lane into one bar, so a 20k-file deploy draws hundreds of shapes, not 20k.
+  type Bar = { worker: number; kind: FileRec["kind"]; x0: number; x1: number; n: number; bytes: number; first: FileRec };
+  const bars: Bar[] = [];
+  const lastOnLane = new Map<number, Bar>();
+  for (const f of [...files].sort((a, b) => a.worker - b.worker || a.t0 - b.t0)) {
+    const x0 = x(f.t0), x1 = x(f.t1);
+    const prev = lastOnLane.get(f.worker);
+    if (prev && prev.kind === f.kind && x0 - prev.x1 < 2 && (x1 - x0 < 2 || prev.x1 - prev.x0 < 2)) {
+      prev.x1 = Math.max(prev.x1, x1); prev.n++; prev.bytes += f.bytes;
+    } else {
+      const b: Bar = { worker: f.worker, kind: f.kind, x0, x1, n: 1, bytes: f.bytes, first: f };
+      bars.push(b); lastOnLane.set(f.worker, b);
+    }
+  }
+  const rects = bars.map((b) => {
+    // 1px gap keeps back-to-back bars distinguishable.
+    const wd = Math.max(1, b.x1 - b.x0 - 1);
+    const tip = b.n === 1
+      ? `${KIND_LABEL[b.kind]} ${b.first.rel} · ${fmtBytes(b.bytes)} · ${fmtMs(b.first.t1 - b.first.t0)} · connection #${b.worker + 1}`
+      : `${KIND_LABEL[b.kind]}: ${b.n} files · ${fmtBytes(b.bytes)} · connection #${b.worker + 1}`;
+    return `<rect x="${b.x0.toFixed(1)}" y="${PAD.t + b.worker * (row + gap)}" width="${wd.toFixed(1)}" height="${row}" fill="${KIND_COLOR[b.kind]}"><title>${esc(tip)}</title></rect>`;
   }).join("");
   const kinds = [...new Set(files.map((f) => f.kind))];
   return legend(kinds.map((k) => ({ label: KIND_LABEL[k], color: KIND_COLOR[k] }))) +
