@@ -27,6 +27,7 @@ type InMsg =
   | { type: "showOutput" }
   | { type: "dismissProgress" }
   | { type: "cancelDeploy" }
+  | { type: "testFtps"; config: DeployConfig }
   | {
       type: "saveConfig";
       config: DeployConfig;
@@ -55,7 +56,8 @@ type OutMsg =
   | { type: "status"; text: string; kind: "idle" | "busy" | "ok" | "error" }
   | { type: "error"; message: string }
   | { type: "connection"; conn: ConnState }
-  | { type: "progress"; state: DeployState | null };
+  | { type: "progress"; state: DeployState | null }
+  | { type: "ftpsResult"; ok: boolean; message: string; certIssue?: boolean; unsupported?: boolean; suggestedHost?: string; testing?: boolean };
 
 /** Read-only facts for display; secrets are reduced to "is it set?" before leaving the host. */
 type InitMeta = {
@@ -78,6 +80,8 @@ type ConnState = {
 
 /** Turns basic-ftp / socket errors into something a non-FTP-expert can act on. */
 function friendlyFtpError(err: unknown, host: string, port: number): string {
+  const tls = ftpClient.diagnoseTlsError(err);
+  if (tls) return tls.message + (tls.suggestedHost ? ` Try host '${tls.suggestedHost}'.` : "");
   const e = err as { code?: string | number; message?: string };
   if (e.code === 530) return "Login failed: wrong FTP username or password.";
   if (e.code === "ENOTFOUND") return `Host '${host}' not found. Check the FTP host.`;
@@ -339,6 +343,33 @@ export class FtpilotPanel implements vscode.WebviewViewProvider {
       case "showOutput":
         await vscode.commands.executeCommand("ftpilot.showOutput");
         return;
+
+      case "testFtps": {
+        if (!root) return;
+        const creds = await getCredentials(this.context, root, "default");
+        if (!creds) {
+          reply({ type: "ftpsResult", ok: false, message: "Save your FTP login first (Update Credentials)." });
+          return;
+        }
+        reply({ type: "ftpsResult", ok: false, testing: true, message: `Trying an encrypted login to ${msg.config.host}…` });
+        try {
+          // Always verify the certificate here: the point is to find a setup that doesn't need the bypass.
+          const client = await ftpClient.connect({ ...msg.config, secure: true, allowInvalidCert: false }, creds);
+          client.close();
+          reply({ type: "ftpsResult", ok: true, message: `FTPS works on ${msg.config.host} with a valid certificate.` });
+        } catch (err) {
+          const tls = ftpClient.diagnoseTlsError(err);
+          reply({
+            type: "ftpsResult",
+            ok: false,
+            message: tls?.message ?? friendlyFtpError(err, msg.config.host, msg.config.port),
+            certIssue: tls?.certIssue,
+            unsupported: tls?.unsupported,
+            suggestedHost: tls?.suggestedHost && tls.suggestedHost !== msg.config.host ? tls.suggestedHost : undefined,
+          });
+        }
+        return;
+      }
 
       case "cancelDeploy":
         await vscode.commands.executeCommand("ftpilot.cancelDeploy");
@@ -690,6 +721,8 @@ const CSS = `
   .empty-state .codicon.big { font-size: 32px; opacity: 0.6; }
   .empty-state button.block { margin-top: 4px; }
 
+  .tls-box .notice { margin: 8px 0 0; }
+  .tls-box .check-row { margin-top: 8px; }
   .detect-note { display: flex; gap: 6px; align-items: flex-start; margin-top: 6px; font-size: 12px; line-height: 1.4; color: var(--vscode-descriptionForeground); }
   .detect-note .codicon { font-size: 14px; margin-top: 1px; color: var(--vscode-testing-iconPassed); }
   .detect-note.bad .codicon { color: var(--vscode-editorWarning-foreground); }
@@ -771,6 +804,7 @@ let draftTimer = null;
 let initDone = false;
 let progress = null; // live/last deploy state from the host
 let progressTimer = null;
+let ftpsResult = null; // last Test FTPS outcome (config tab)
 let detectNotes = {}; // target index -> { text, ok } from the last Auto-detect
 let pendingFocus = null;
 
@@ -795,7 +829,7 @@ document.addEventListener("input", scheduleDraft);
 document.addEventListener("change", scheduleDraft);
 
 function defaultConfig() {
-  return { deployBranch: "deploy", host: "", port: 21, secure: false, uploadMode: "incremental", maxConnections: 8, exclude: ["*.map", "*.d.ts"], targets: [] };
+  return { deployBranch: "deploy", host: "", port: 21, secure: true, uploadMode: "incremental", maxConnections: 8, exclude: ["*.map", "*.d.ts"], targets: [] };
 }
 function blankTarget() {
   return { id: genId(), name: "", buildCommand: "", cwd: "", localDir: "", remoteDir: "", env: [] };
@@ -853,6 +887,7 @@ window.addEventListener("message", (e) => {
     // Index-keyed toggles would leak onto other targets after a reload; reset them.
     advancedOpen = {};
     detectNotes = {};
+    if (ftpsResult && ftpsResult.testing) ftpsResult = null;
     render();
     initDone = true;
     if (pendingFocus) { const f = pendingFocus; pendingFocus = null; applyFocus(f); }
@@ -880,6 +915,9 @@ window.addEventListener("message", (e) => {
     for (const box of document.querySelectorAll("[data-conn]")) box.replaceWith(box.dataset.conn === "ops" ? opsConnectionBody() : connectionBox());
     const acts = document.getElementById("conn-acts");
     if (acts) acts.replaceWith(opsConnActions());
+  } else if (msg.type === "ftpsResult") {
+    ftpsResult = msg;
+    render();
   } else if (msg.type === "progress") {
     const wasRunning = isRunning(progress);
     progress = msg.state;
@@ -1047,6 +1085,7 @@ function stripConfig(c) {
   });
   return {
     deployBranch: c.deployBranch, host: c.host, port: c.port, secure: c.secure, uploadMode: c.uploadMode,
+    ...(c.secure && c.allowInvalidCert ? { allowInvalidCert: true } : {}),
     maxConnections: c.maxConnections || 8,
     exclude: (c.exclude || []).map((p) => p.trim()).filter(Boolean),
     targets,
@@ -1208,7 +1247,12 @@ function opsConnectionBody() {
       : el("span", { class: "warn-text", title: "You are on '" + branch + "'. Deploying will ask first." }, [ic("warning"), " on " + branch]);
   const c = CONN[conn.state];
   return el("div", { "data-conn": "ops", class: "kv-list" }, [
-    kv("server", "Host", [cfg.host ? cfg.host + ":" + cfg.port : "Not set", el("span", { class: "muted" }, [" (" + (cfg.secure ? "FTPS" : "FTP") + ")"])]),
+    kv("server", "Host", [cfg.host ? cfg.host + ":" + cfg.port : "Not set", el("span", { class: "muted" }, [" (" + (cfg.secure ? "FTPS" : "FTP") + ")"])],
+      !cfg.secure
+        ? el("span", { class: "warn-text", title: "Plain FTP sends your password and files unencrypted. Open the configuration to test FTPS." }, [ic("unlock"), " Unencrypted"])
+        : cfg.allowInvalidCert
+          ? el("span", { class: "warn-text", title: "Encrypted, but the server certificate isn't verified." }, [ic("warning"), " Cert not verified"])
+          : el("span", { class: "ok-icon", title: "Encrypted (FTPS)" }, [ic("lock")])),
     kv("account", "Account", [login.user && login.hasPassword ? login.user : el("span", { class: "warn-text" }, ["Not set"])],
       iconBtn("edit", "Update Credentials", () => post({ type: "updateCredentials", account: "default" }))),
     kv("git-branch", "Branch", [cfg.deployBranch], branchExtra),
@@ -1399,6 +1443,33 @@ function envVarsSection(target) {
   ]);
 }
 
+// Encryption guidance under the Protocol field: warn on plain FTP, help get FTPS working.
+function tlsBox() {
+  const kids = [];
+  if (!cfg.secure) {
+    kids.push(notice("warn", "warning", ["Plain FTP sends your password and files unencrypted."], [
+      link("Test FTPS", () => post({ type: "testFtps", config: stripConfig(cfg) })),
+    ]));
+  }
+  if (ftpsResult) {
+    const r = ftpsResult;
+    const actions = [];
+    if (r.ok && !cfg.secure) actions.push(link("Switch to FTPS", () => { cfg.secure = true; cfg.allowInvalidCert = false; ftpsResult = null; render(); }));
+    if (r.suggestedHost) actions.push(link("Use " + r.suggestedHost, () => { cfg.host = r.suggestedHost; ftpsResult = null; post({ type: "testFtps", config: { ...stripConfig(cfg), host: r.suggestedHost } }); render(); }));
+    kids.push(notice(r.testing ? "busy" : r.ok ? "ok" : "error", r.testing ? "loading codicon-modifier-spin" : r.ok ? "pass" : "error", [r.message], actions.length ? actions : null));
+  }
+  // The bypass is only offered once it's actually needed (a cert problem was seen) or already on.
+  if (cfg.secure && (cfg.allowInvalidCert || (ftpsResult && ftpsResult.certIssue))) {
+    kids.push(el("label", { class: "check-row" }, [
+      el("input", { type: "checkbox", ...(cfg.allowInvalidCert ? { checked: "checked" } : {}), onchange: (e) => { cfg.allowInvalidCert = e.target.checked; render(); } }),
+      "Allow invalid or mismatched certificate",
+      info("Still encrypted, but FTPilot won't verify who it's talking to, so a network attacker could intercept the connection. Prefer using the hostname the certificate is issued for."),
+    ]));
+    if (cfg.allowInvalidCert) kids.push(el("p", { class: "hint warn-text" }, ["Less safe: certificate checks are off for this project."]));
+  }
+  return kids.length ? el("div", { class: "tls-box" }, kids) : null;
+}
+
 function renderConfig(root) {
   root.appendChild(el("div", { class: "cfg-header" }, [
     el("div", {}, [el("h1", {}, ["FTPilot Configuration"]), el("p", { class: "hint" }, [(meta && meta.projectName) || ""])]),
@@ -1429,6 +1500,7 @@ function renderConfig(root) {
         (v) => { cfg.uploadMode = v; scheduleDraft(); },
         { info: "Incremental also deletes remote files FTPilot uploaded earlier that no longer exist locally. Full never deletes." }),
     ]),
+    tlsBox(),
   ]));
 
   root.appendChild(section("upload", "Upload", [

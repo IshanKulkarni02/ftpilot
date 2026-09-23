@@ -34,6 +34,13 @@ Open it with the gear icon. Changes are kept as a draft until you **Save Configu
 | **Dedicated FTP Account** | For a subdomain with its own FTP login. |
 | **Build Environment Variables** | Injected into the build. Secret values live in VS Code SecretStorage. |
 
+## Encryption (FTPS)
+
+- New projects use **FTPS (explicit TLS)**. Plain FTP sends your password and files unencrypted, so the sidebar marks it **Unencrypted**.
+- On plain FTP, **Test FTPS** (in the configuration tab, under Protocol) tries an encrypted login with your saved credentials.
+- Shared cPanel hosts often have a certificate for the *server's* hostname, not `ftp.yourdomain`. The test reads the certificate and offers **Use &lt;that hostname&gt;**, which is the safe fix.
+- **Allow invalid or mismatched certificate** only appears after a certificate problem. It keeps encryption but skips verification, so use it only as a last resort.
+
 ## Where things are stored
 
 - `.ftbdeploy/config.json`: settings, no secrets. Safe to commit.

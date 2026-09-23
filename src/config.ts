@@ -38,6 +38,8 @@ export interface DeployConfig {
   host: string;
   port: number;
   secure: boolean;
+  /** FTPS only: skip certificate verification (e.g. shared host whose cert names another hostname). Less safe. */
+  allowInvalidCert?: boolean;
   uploadMode: "incremental" | "full";
   /** Upper bound for parallel FTP connections; the adaptive controller stays at or below it. */
   maxConnections?: number;
@@ -54,7 +56,7 @@ export const DEFAULT_CONFIG: DeployConfig = {
   deployBranch: "deploy",
   host: "",
   port: 21,
-  secure: false,
+  secure: true,
   uploadMode: "incremental",
   maxConnections: DEFAULT_MAX_CONNECTIONS,
   exclude: DEFAULT_EXCLUDE,

@@ -17,8 +17,61 @@ export async function connect(
     user: creds.user,
     password: creds.password,
     secure: config.secure,
+    secureOptions: config.secure && config.allowInvalidCert ? { rejectUnauthorized: false } : undefined,
   });
   return client;
+}
+
+export interface TlsDiagnosis {
+  /** Plain-language explanation. */
+  message: string;
+  /** The certificate is the problem (not login/network). */
+  certIssue: boolean;
+  /** Server doesn't offer FTPS at all. */
+  unsupported?: boolean;
+  /** A hostname the certificate *is* valid for, when that can be read from it. */
+  suggestedHost?: string;
+}
+
+const CERT_CODES = new Set([
+  "ERR_TLS_CERT_ALTNAME_INVALID", "DEPTH_ZERO_SELF_SIGNED_CERT", "SELF_SIGNED_CERT_IN_CHAIN",
+  "CERT_HAS_EXPIRED", "UNABLE_TO_VERIFY_LEAF_SIGNATURE", "UNABLE_TO_GET_ISSUER_CERT_LOCALLY",
+]);
+
+/**
+ * Explains an FTPS failure. Shared cPanel hosts commonly present a certificate for the
+ * server's own hostname rather than ftp.<your-domain>; in that case the cert's names are
+ * read so the UI can offer "use this hostname instead" rather than disabling verification.
+ */
+export function diagnoseTlsError(err: unknown): TlsDiagnosis | undefined {
+  const e = err as { code?: string | number; message?: string; cert?: { subjectaltname?: string; subject?: { CN?: string } } };
+  const msg = e?.message ?? "";
+  if (typeof e?.code === "number" && e.code >= 500 && /AUTH|TLS|SSL/i.test(msg)) {
+    return { message: `This server doesn't offer FTPS (${msg.trim()}).`, certIssue: false, unsupported: true };
+  }
+  const code = typeof e?.code === "string" ? e.code : "";
+  if (!CERT_CODES.has(code) && !/certificate|altnames|self[- ]signed/i.test(msg)) return undefined;
+
+  const names = (e.cert?.subjectaltname ?? "")
+    .split(",")
+    .map((n) => n.trim().replace(/^DNS:/, ""))
+    .filter((n) => n && !n.startsWith("IP Address"));
+  if (!names.length && e.cert?.subject?.CN) names.push(e.cert.subject.CN);
+  // A wildcard can't be dialled directly; prefer a concrete name.
+  const suggestedHost = names.find((n) => !n.startsWith("*."));
+
+  if (code === "ERR_TLS_CERT_ALTNAME_INVALID") {
+    return {
+      message: `The server's certificate isn't valid for this hostname${names.length ? `; it's issued for ${names.slice(0, 3).join(", ")}` : ""}.`,
+      certIssue: true,
+      suggestedHost,
+    };
+  }
+  if (code === "CERT_HAS_EXPIRED") return { message: "The server's certificate has expired.", certIssue: true };
+  if (/SELF_SIGNED/.test(code) || /self[- ]signed/i.test(msg)) {
+    return { message: "The server uses a self-signed certificate, which can't be verified.", certIssue: true };
+  }
+  return { message: `The server's certificate couldn't be verified (${code || msg}).`, certIssue: true };
 }
 
 export function remoteJoin(remoteDir: string, relPath: string): string {
