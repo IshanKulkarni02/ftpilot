@@ -3,7 +3,7 @@ import * as fs from "fs";
 import * as path from "path";
 import { loadConfig, manifestPath, updateTargetLocalDir, DeployTarget } from "./config";
 import { getCredentials } from "./secrets";
-import { getCurrentBranch } from "./git";
+import { getCurrentBranch, checkoutBranch } from "./git";
 import { runBuild } from "./build";
 import { loadManifest, saveManifest, hashTarget, diffTarget, Manifest } from "./manifest";
 import { snapshotTopLevelDirs, diffTopLevelDirs } from "./detect";
@@ -46,22 +46,31 @@ export async function runDeploy(
     return { ok: false, message: (err as Error).message };
   }
 
-  if (config.warnIfNotOnBranch) {
-    try {
-      const branch = await getCurrentBranch(workspaceRoot);
-      if (branch !== config.deployBranch) {
-        const choice = await vscode.window.showWarningMessage(
-          `You're on branch '${branch}', but FTPilot is configured for '${config.deployBranch}'. Deploy anyway?`,
-          { modal: true },
-          "Deploy Anyway"
-        );
-        if (choice !== "Deploy Anyway") {
-          return { ok: false, message: "Cancelled (not on deploy branch)." };
+  try {
+    const branch = await getCurrentBranch(workspaceRoot);
+    if (branch !== config.deployBranch) {
+      const choice = await vscode.window.showWarningMessage(
+        `FTPilot deploys from branch '${config.deployBranch}', but you're currently on '${branch}'.`,
+        { modal: true },
+        "Deploy This Branch",
+        "Switch & Deploy"
+      );
+      if (choice === "Switch & Deploy") {
+        output.show(true);
+        output.appendLine(`\nSwitching to branch '${config.deployBranch}'...`);
+        try {
+          await checkoutBranch(workspaceRoot, config.deployBranch);
+        } catch (err) {
+          const message = `Couldn't switch to '${config.deployBranch}': ${(err as Error).message}`;
+          void vscode.window.showErrorMessage(`FTPilot: ${message}`);
+          return { ok: false, message };
         }
+      } else if (choice !== "Deploy This Branch") {
+        return { ok: false, message: "Cancelled (not on deploy branch)." };
       }
-    } catch {
-      // not a git repo, or git not available — skip the branch check silently
     }
+  } catch {
+    // not a git repo, or git not available — skip the branch check silently
   }
 
   output.clear();

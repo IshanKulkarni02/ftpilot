@@ -20,7 +20,6 @@ export interface DeployTarget {
 
 export interface DeployConfig {
   deployBranch: string;
-  warnIfNotOnBranch: boolean;
   host: string;
   port: number;
   secure: boolean;
@@ -30,7 +29,6 @@ export interface DeployConfig {
 
 export const DEFAULT_CONFIG: DeployConfig = {
   deployBranch: "deploy",
-  warnIfNotOnBranch: true,
   host: "",
   port: 21,
   secure: false,

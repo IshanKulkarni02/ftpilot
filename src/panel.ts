@@ -243,7 +243,7 @@ let dirsCache = {};
 let requestedPaths = new Set();
 
 function defaultConfig() {
-  return { deployBranch: "deploy", warnIfNotOnBranch: true, host: "", port: 21, secure: false, uploadMode: "incremental", targets: [] };
+  return { deployBranch: "deploy", host: "", port: 21, secure: false, uploadMode: "incremental", targets: [] };
 }
 function blankTarget() {
   return { name: "", buildCommand: "", cwd: "", localDir: "", remoteDir: "" };
@@ -432,7 +432,6 @@ function renderConfirmSave() {
   root.appendChild(el("h3", {}, ["Confirm & Save"]));
   const box = el("div", { class: "summary" }, [
     summaryField("Deploy branch", cfg.deployBranch),
-    summaryField("Warn if off-branch", cfg.warnIfNotOnBranch ? "Yes" : "No"),
     summaryField("FTP host", cfg.host + ":" + cfg.port),
     summaryField("Protocol", cfg.secure ? "FTPS" : "Plain FTP"),
     summaryField("Upload mode", cfg.uploadMode),
@@ -471,7 +470,7 @@ function stripConfig(c) {
     if (t.ftpUser) clean.ftpUser = t.ftpUser;
     return clean;
   });
-  return { deployBranch: c.deployBranch, warnIfNotOnBranch: c.warnIfNotOnBranch, host: c.host, port: c.port, secure: c.secure, uploadMode: c.uploadMode, targets };
+  return { deployBranch: c.deployBranch, host: c.host, port: c.port, secure: c.secure, uploadMode: c.uploadMode, targets };
 }
 
 function render() {
@@ -496,9 +495,6 @@ function render() {
 
   const branchInput = labeledInput("Git branch to deploy from", cfg.deployBranch, (v) => cfg.deployBranch = v, { placeholder: "deploy" });
 
-  const warnCheckbox = el("input", { type: "checkbox", ...(cfg.warnIfNotOnBranch ? { checked: "checked" } : {}), onchange: (e) => cfg.warnIfNotOnBranch = e.target.checked });
-  const warnRow = el("div", { class: "checkbox-row" }, [warnCheckbox, el("label", {}, ["Warn if not on that branch"])]);
-
   const hostInput = labeledInput("FTP host", cfg.host, (v) => cfg.host = v, { placeholder: "ftp.yourdomain.com" });
   const portInput = labeledInput("Port", String(cfg.port || 21), (v) => cfg.port = parseInt(v, 10) || 21, { type: "number" });
 
@@ -516,7 +512,7 @@ function render() {
 
   const connectionSection = el("section", {}, [
     el("h3", {}, ["Connection"]),
-    branchInput, warnRow,
+    branchInput,
     el("div", { class: "row2" }, [hostInput, portInput]),
     el("div", { class: "row2" }, [protoLabel, modeLabel]),
   ]);

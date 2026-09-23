@@ -16,3 +16,15 @@ export function getCurrentBranch(cwd: string): Promise<string> {
     );
   });
 }
+
+export function checkoutBranch(cwd: string, branch: string): Promise<void> {
+  return new Promise((resolve, reject) => {
+    execFile("git", ["checkout", branch], { cwd }, (err, _stdout, stderr) => {
+      if (err) {
+        reject(new Error(stderr || err.message));
+        return;
+      }
+      resolve();
+    });
+  });
+}
