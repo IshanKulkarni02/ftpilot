@@ -154,3 +154,64 @@ export function diffTopLevelDirs(before: DirSnapshot, after: DirSnapshot): strin
     return rank(a) - rank(b);
   });
 }
+
+/** Next.js: static export ("output: 'export'") writes to distDir or "out"; anything else needs a Node server, not an FTP upload. */
+function detectNextOutput(cwd: string): { dir?: string; note?: string } {
+  const file = ["next.config.ts", "next.config.mjs", "next.config.js"].map((n) => path.join(cwd, n)).find((p) => fs.existsSync(p));
+  const src = file ? fs.readFileSync(file, "utf8") : "";
+  if (/output\s*:\s*["']export["']/.test(src)) {
+    const distDir = /distDir\s*:\s*["']([^"']+)["']/.exec(src)?.[1];
+    return { dir: distDir ? distDir.replace(/^\.\//, "") : "out" };
+  }
+  return { note: "Next.js without output: \"export\" needs a Node server; set output: \"export\" in next.config to deploy static files over FTP." };
+}
+
+export interface DetectResult {
+  /** Workspace-relative folder that actually holds package.json (may differ from what was asked). */
+  cwd: string;
+  buildCommand?: string;
+  localDir?: string;
+  /** Human-readable summary of what was (or wasn't) found. */
+  note: string;
+}
+
+/**
+ * Auto-detect for one target. Walks up from `cwdRel` to the nearest package.json (never above
+ * the workspace root), so picking an output folder like apps/web/out by mistake still resolves to apps/web.
+ */
+export function detectProject(workspaceRoot: string, cwdRel: string): DetectResult {
+  let rel = cwdRel.replace(/^\.\/?/, "").replace(/\/+$/, "");
+  while (!fs.existsSync(path.join(workspaceRoot, rel, "package.json"))) {
+    if (!rel) {
+      return { cwd: cwdRel, note: `No package.json found in '${cwdRel || "."}' or its parent folders. Set Working Directory to the folder that has package.json.` };
+    }
+    rel = rel.includes("/") ? rel.slice(0, rel.lastIndexOf("/")) : "";
+  }
+  const abs = path.join(workspaceRoot, rel);
+  const notes: string[] = [];
+  if (rel !== cwdRel) notes.push(`Working Directory set to '${rel || "."}' (where package.json is).`);
+
+  const buildCommand = detectBuildCommand(abs);
+  if (!buildCommand) notes.push("No \"build\" script in package.json.");
+
+  const pkg = readPackageJson(abs);
+  const deps = { ...pkg?.dependencies, ...pkg?.devDependencies };
+  let outDir: string | undefined;
+  if (deps.next) {
+    const next = detectNextOutput(abs);
+    outDir = next.dir;
+    if (next.note) notes.push(next.note);
+  } else {
+    outDir = detectOutputDir(abs);
+  }
+  const localDir = outDir ? (rel ? `${rel}/${outDir}` : outDir) : undefined;
+  if (!outDir && !deps.next) notes.push("Couldn't tell the output folder; pick it manually.");
+
+  // Reported, not auto-added: blank build env vars override .env.production, and
+  // runtime-only secrets (DB URLs etc.) would block every deploy until filled in.
+  const envKeys = detectEnvKeys(abs);
+  if (envKeys.length) notes.push(`${envKeys.length} key(s) in .env.example; add them under Advanced only if the build needs them.`);
+
+  const found = [buildCommand && `build '${buildCommand}'`, localDir && `output '${localDir}'`].filter(Boolean).join(", ");
+  return { cwd: rel, buildCommand, localDir, note: [found ? `Detected ${found}.` : "", ...notes].filter(Boolean).join(" ") };
+}
