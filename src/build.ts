@@ -56,11 +56,24 @@ export async function validateEnvSecrets(
   }
 }
 
+/** Where build output goes: the Output channel, optionally teed into a log file buffer. */
+export type LogSink = Pick<vscode.OutputChannel, "append" | "appendLine">;
+
+/** A failed build, carrying the tail of its output so the UI/report can show *why*. */
+export class BuildError extends Error {
+  constructor(message: string, public readonly detail: string) {
+    super(message);
+  }
+}
+
+const TAIL_LINES = 40;
+
 export async function runBuild(
   context: vscode.ExtensionContext,
   target: DeployTarget,
   workspaceRoot: string,
-  output: vscode.OutputChannel
+  output: LogSink,
+  onLine?: (line: string) => void
 ): Promise<void> {
   if (!target.buildCommand) {
     return;
@@ -77,15 +90,28 @@ export async function runBuild(
       env,
     });
 
-    child.stdout.on("data", (chunk) => output.append(chunk.toString()));
-    child.stderr.on("data", (chunk) => output.append(chunk.toString()));
+    const tail: string[] = [];
+    const onData = (chunk: Buffer) => {
+      const text = chunk.toString();
+      output.append(text);
+      // Strip ANSI colour codes so the panel/report show clean text.
+      for (const raw of text.split(/\r?\n|\r/)) {
+        const line = raw.replace(/\x1b\[[0-9;]*[A-Za-z]/g, "").trimEnd();
+        if (!line.trim()) continue;
+        tail.push(line);
+        if (tail.length > TAIL_LINES) tail.shift();
+        onLine?.(line);
+      }
+    };
+    child.stdout.on("data", onData);
+    child.stderr.on("data", onData);
 
     child.on("error", (err) => reject(err));
     child.on("close", (code) => {
       if (code === 0) {
         resolve();
       } else {
-        reject(new Error(`[${target.name}] build command exited with code ${code}`));
+        reject(new BuildError(`[${target.name}] build command exited with code ${code}`, tail.join("\n")));
       }
     });
   });

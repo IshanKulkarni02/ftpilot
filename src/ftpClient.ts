@@ -27,29 +27,30 @@ function remoteJoin(remoteDir: string, relPath: string): string {
   return `${remoteDir.replace(/\/+$/, "")}/${normalizedRel}`;
 }
 
-/** Uploads every file under localDir to remoteDir, overwriting as needed. Never deletes anything remote. */
-export async function uploadFull(
-  client: ftp.Client,
-  localDir: string,
-  remoteDir: string
-): Promise<number> {
-  await ensureRemoteDir(client, remoteDir);
-  await client.uploadFromDir(localDir, remoteDir);
-  return walkDir(localDir).length;
-}
-
-/** Uploads a single relative file path from localDir to remoteDir, creating remote subdirs as needed. */
-export async function uploadOne(
+/**
+ * Uploads the given relative paths one by one, reporting each finished file, so the UI can
+ * show "37 / 120". Remote dirs are created once per run (cached), not once per file.
+ */
+export async function uploadFiles(
   client: ftp.Client,
   localDir: string,
   remoteDir: string,
-  relPath: string
+  relPaths: string[],
+  onFile: (relPath: string) => void
 ): Promise<void> {
-  const localPath = path.join(localDir, relPath);
-  const remotePath = remoteJoin(remoteDir, relPath);
-  const remoteFileDir = path.posix.dirname(remotePath);
-  await ensureRemoteDir(client, remoteFileDir);
-  await client.uploadFrom(localPath, remotePath);
+  const ensured = new Set<string>();
+  const home = await client.pwd();
+  for (const relPath of relPaths) {
+    const remotePath = remoteJoin(remoteDir, relPath);
+    const dir = path.posix.dirname(remotePath);
+    if (!ensured.has(dir)) {
+      await client.ensureDir(dir);
+      await client.cd(home);
+      ensured.add(dir);
+    }
+    await client.uploadFrom(path.join(localDir, relPath), remotePath);
+    onFile(relPath);
+  }
 }
 
 export async function removeOne(
