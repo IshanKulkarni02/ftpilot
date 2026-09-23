@@ -1,0 +1,7 @@
+node_modules/
+out/
+*.vsix
+.DS_Store
+
+# per-workspace deploy manifests should not be committed (local upload state)
+.ftbdeploy/manifest.json

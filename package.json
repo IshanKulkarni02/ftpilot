@@ -1,0 +1,51 @@
+{
+  "name": "ftpilot",
+  "displayName": "FTPilot",
+  "description": "Build and FTP-deploy a git 'deploy' branch to multiple cPanel domains/subdomains, one click.",
+  "version": "0.1.0",
+  "publisher": "local",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": ["Other"],
+  "activationEvents": ["onStartupFinished"],
+  "main": "./out/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "ftpilot.setup",
+        "title": "FTPilot: Configure Project"
+      },
+      {
+        "command": "ftpilot.deploy",
+        "title": "FTPilot: Deploy / Redeploy"
+      },
+      {
+        "command": "ftpilot.fullRedeploy",
+        "title": "FTPilot: Force Full Re-upload"
+      },
+      {
+        "command": "ftpilot.setCredentials",
+        "title": "FTPilot: Set FTP Credentials"
+      },
+      {
+        "command": "ftpilot.editConfig",
+        "title": "FTPilot: Edit Config File"
+      }
+    ]
+  },
+  "scripts": {
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "package": "vsce package"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.0",
+    "@types/vscode": "^1.85.0",
+    "@vscode/vsce": "^2.24.0",
+    "typescript": "^5.4.0"
+  },
+  "dependencies": {
+    "basic-ftp": "^5.0.4"
+  }
+}
