@@ -90,7 +90,7 @@ export async function runDeploy(
       const buildCwd = target.cwd ? path.join(workspaceRoot, target.cwd) : workspaceRoot;
       const before = target.buildCommand ? snapshotTopLevelDirs(buildCwd) : undefined;
 
-      await runBuild(target, workspaceRoot, output);
+      await runBuild(context, target, workspaceRoot, output);
 
       const localDir = path.join(workspaceRoot, target.localDir);
       if (target.buildCommand && !fs.existsSync(localDir)) {

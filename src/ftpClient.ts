@@ -1,4 +1,5 @@
 import * as ftp from "basic-ftp";
+import * as fs from "fs";
 import * as path from "path";
 import { Readable } from "stream";
 import { DeployConfig } from "./config";
@@ -72,6 +73,16 @@ export async function touchRestartFile(
   await ensureRemoteDir(client, dir);
   const content = Readable.from(Buffer.from(new Date().toISOString()));
   await client.uploadFrom(content, restartFilePath);
+}
+
+/** Recursively downloads every file under remoteDir into localDestDir, preserving structure. Read-only on the server. */
+export async function downloadDir(
+  client: ftp.Client,
+  remoteDir: string,
+  localDestDir: string
+): Promise<void> {
+  fs.mkdirSync(localDestDir, { recursive: true });
+  await client.downloadToDir(localDestDir, remoteDir);
 }
 
 async function ensureRemoteDir(client: ftp.Client, remoteDir: string): Promise<void> {

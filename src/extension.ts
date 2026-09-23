@@ -1,5 +1,6 @@
 import * as vscode from "vscode";
 import { runDeploy } from "./deploy";
+import { runBackup } from "./backup";
 import { setCredentials } from "./secrets";
 import { configPath, configExists } from "./config";
 import { FtpilotPanel } from "./panel";
@@ -49,6 +50,11 @@ export function activate(context: vscode.ExtensionContext): void {
 
     vscode.commands.registerCommand("ftpilot.fullRedeploy", async () => {
       await runDeploy(context, output, statusBar, { forceFull: true });
+      panel.refresh();
+    }),
+
+    vscode.commands.registerCommand("ftpilot.backup", async () => {
+      await runBackup(context, output);
       panel.refresh();
     }),
 

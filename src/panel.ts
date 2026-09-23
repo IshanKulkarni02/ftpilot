@@ -2,10 +2,12 @@ import * as vscode from "vscode";
 import * as fs from "fs";
 import * as path from "path";
 import { DeployConfig, configExists, loadConfig, saveConfig } from "./config";
-import { setCredentials } from "./secrets";
-import { detectBuildCommand, detectOutputDir } from "./detect";
+import { setCredentials, setEnvSecret } from "./secrets";
+import { detectBuildCommand, detectOutputDir, detectEnvKeys } from "./detect";
 
 type TargetCreds = Record<string, { user: string; password: string }>;
+/** Target name -> env var key -> value, for secret-flagged env vars being set/rotated. */
+type TargetEnvSecrets = Record<string, Record<string, string>>;
 
 type InMsg =
   | { type: "ready" }
@@ -15,22 +17,41 @@ type InMsg =
       defaultUser?: string;
       defaultPassword?: string;
       targetCreds?: TargetCreds;
+      envSecrets?: TargetEnvSecrets;
     }
   | { type: "deploy" }
   | { type: "fullRedeploy" }
+  | { type: "backup" }
   | { type: "openConfigJson" }
   | { type: "detect"; index: number; cwd: string }
   | { type: "listDirs"; forPath: string };
 
 type OutMsg =
   | { type: "init"; workspaceOpen: boolean; config?: DeployConfig }
-  | { type: "detected"; index: number; buildCommand?: string; localDir?: string }
+  | { type: "detected"; index: number; buildCommand?: string; localDir?: string; envKeys?: string[] }
   | { type: "dirs"; forPath: string; dirs: string[] }
   | { type: "saved" }
   | { type: "status"; text: string; kind: "idle" | "busy" | "ok" | "error" }
   | { type: "error"; message: string };
 
 const IGNORE_DIR_NAMES = new Set(["node_modules", ".git", ".vscode", ".ftbdeploy"]);
+
+/**
+ * config.json (shared target/env config) is meant to be committed; manifest.json is a
+ * per-machine build-state cache that would make contributors' incremental diffs clobber
+ * each other if shared. Make sure it's gitignored the first time we save.
+ */
+function ensureManifestGitignored(workspaceRoot: string): void {
+  const entry = ".ftbdeploy/manifest.json";
+  const gitignorePath = path.join(workspaceRoot, ".gitignore");
+  let existing = "";
+  if (fs.existsSync(gitignorePath)) {
+    existing = fs.readFileSync(gitignorePath, "utf8");
+    if (existing.split(/\r?\n/).some((line) => line.trim() === entry)) return;
+  }
+  const prefix = existing && !existing.endsWith("\n") ? "\n" : "";
+  fs.writeFileSync(gitignorePath, `${existing}${prefix}${entry}\n`, "utf8");
+}
 
 export class FtpilotPanel implements vscode.WebviewViewProvider {
   public static readonly viewType = "ftpilotPanel";
@@ -113,7 +134,8 @@ export class FtpilotPanel implements vscode.WebviewViewProvider {
         const buildCommand = detectBuildCommand(absCwd);
         const outDir = detectOutputDir(absCwd);
         const localDir = outDir ? (msg.cwd ? `${msg.cwd}/${outDir}` : outDir) : undefined;
-        this.post({ type: "detected", index: msg.index, buildCommand, localDir });
+        const envKeys = detectEnvKeys(absCwd);
+        this.post({ type: "detected", index: msg.index, buildCommand, localDir, envKeys });
         return;
       }
 
@@ -121,6 +143,7 @@ export class FtpilotPanel implements vscode.WebviewViewProvider {
         if (!root) return;
         try {
           saveConfig(root, msg.config);
+          ensureManifestGitignored(root);
           if (msg.defaultUser && msg.defaultPassword) {
             await setCredentials(this.context, root, "default", {
               user: msg.defaultUser,
@@ -131,6 +154,15 @@ export class FtpilotPanel implements vscode.WebviewViewProvider {
             for (const [account, creds] of Object.entries(msg.targetCreds)) {
               if (creds.user && creds.password) {
                 await setCredentials(this.context, root, account, creds);
+              }
+            }
+          }
+          if (msg.envSecrets) {
+            for (const [targetName, vars] of Object.entries(msg.envSecrets)) {
+              for (const [key, value] of Object.entries(vars)) {
+                if (value) {
+                  await setEnvSecret(this.context, root, targetName, key, value);
+                }
               }
             }
           }
@@ -151,6 +183,12 @@ export class FtpilotPanel implements vscode.WebviewViewProvider {
       case "fullRedeploy":
         this.reportStatus("Force re-uploading everything...", "busy");
         await vscode.commands.executeCommand("ftpilot.fullRedeploy");
+        this.postInit();
+        return;
+
+      case "backup":
+        this.reportStatus("Backing up server...", "busy");
+        await vscode.commands.executeCommand("ftpilot.backup");
         this.postInit();
         return;
 
@@ -224,6 +262,11 @@ const CSS = `
   .summary .target-block { margin-top: 8px; padding-top: 8px; border-top: 1px solid var(--vscode-panel-border, #8883); }
   .summary .target-block:first-child { margin-top: 0; padding-top: 0; border-top: none; }
   .warn-banner { font-size: 12px; background: var(--vscode-inputValidation-warningBackground, #5522); color: var(--vscode-inputValidation-warningForeground, var(--vscode-foreground)); padding: 6px 8px; border-radius: 3px; margin-bottom: 8px; }
+  .env-section { margin-top: 8px; }
+  .env-row { display: grid; grid-template-columns: 1.2fr auto 1fr auto; align-items: center; gap: 4px; margin: 3px 0; }
+  .env-row input[type=text], .env-row input[type=password] { width: 100%; box-sizing: border-box; margin: 0; }
+  .env-row input[type=checkbox] { width: auto; margin: 0; }
+  .env-row .remove-btn { margin: 0; }
 `;
 
 const SCRIPT = `
@@ -236,9 +279,11 @@ let defaultCredsOpen = false;
 let defaultUser = "", defaultPassword = "";
 let targetCredsOpen = {};
 let targetCreds = {};
+let envSecrets = {};
 let lastStatus = null;
-let view = "form"; // "form" | "confirmSave" | "confirmDeploy" | "confirmFull"
+let view = "form"; // "form" | "confirmSave" | "confirmDeploy" | "confirmFull" | "confirmBackup"
 let customFields = {};
+let advancedOpen = {};
 let dirsCache = {};
 let requestedPaths = new Set();
 
@@ -246,7 +291,16 @@ function defaultConfig() {
   return { deployBranch: "deploy", host: "", port: 21, secure: false, uploadMode: "incremental", targets: [] };
 }
 function blankTarget() {
-  return { name: "", buildCommand: "", cwd: "", localDir: "", remoteDir: "" };
+  return { name: "", buildCommand: "", cwd: "", localDir: "", remoteDir: "", env: [] };
+}
+
+// Framework convention: these get shipped into the client bundle at build time regardless
+// of storage, so defaulting them to "secret" would be misleading.
+const NEVER_SECRET_PREFIX = /^(NEXT_PUBLIC_|VITE_|REACT_APP_|PUBLIC_)/;
+const LIKELY_SECRET = /SECRET|TOKEN|PASSWORD|PWD|API_KEY|PRIVATE|CREDENTIAL/i;
+function guessSecret(key) {
+  if (NEVER_SECRET_PREFIX.test(key)) return false;
+  return LIKELY_SECRET.test(key);
 }
 
 function ensureDirsRequested(forPath) {
@@ -263,12 +317,23 @@ window.addEventListener("message", (e) => {
     workspaceOpen = msg.workspaceOpen;
     cfg = msg.config || defaultConfig();
     view = "form";
+    // Index-keyed UI toggle state (which target's Advanced section is expanded) would
+    // otherwise leak onto the wrong target if targets are added/removed and indices get
+    // reused across a config reload — reset it on every fresh load.
+    advancedOpen = {};
     render();
   } else if (msg.type === "detected") {
     const t = cfg.targets[msg.index];
     if (!t) return;
     if (msg.buildCommand) t.buildCommand = msg.buildCommand;
     if (msg.localDir) { t.localDir = msg.localDir; customFields["localDir_" + msg.index] = false; }
+    if (msg.envKeys && msg.envKeys.length) {
+      if (!t.env) t.env = [];
+      const existingKeys = new Set(t.env.map((v) => v.key));
+      for (const key of msg.envKeys) {
+        if (!existingKeys.has(key)) t.env.push({ key, value: "", secret: guessSecret(key) });
+      }
+    }
     render();
   } else if (msg.type === "dirs") {
     dirsCache[msg.forPath || ""] = msg.dirs;
@@ -384,6 +449,21 @@ function targetCard(target, index) {
     ? labeledInput("Restart file (full FTP path)", target.restartFile, (v) => { target.restartFile = v; }, { placeholder: "/api.example.com/tmp/restart.txt" })
     : null;
 
+  // Hidden by default: restarting the wrong app is quietly dangerous, so it should only
+  // show up for someone who specifically goes looking for it, not during normal setup.
+  const advKey = "adv_" + index;
+  const advOpen = advKey in advancedOpen ? advancedOpen[advKey] : isBackend;
+  const advToggle = el("button", {
+    class: "link inline-btn",
+    onclick: () => { advancedOpen[advKey] = !advOpen; render(); },
+  }, [advOpen ? "▾ Hide advanced option" : "▸ Advanced: restart Node.js app after upload"]);
+  const advancedSection = advOpen
+    ? el("div", {}, [
+        el("p", { class: "hint" }, ["Only for a cPanel \"Setup Node.js App\" (Passenger) backend. Restarting the wrong app can cause downtime — leave this off unless you specifically need it."]),
+        backendRow, restartInput,
+      ])
+    : null;
+
   const sepCheckbox = el("input", {
     type: "checkbox",
     ...(hasSeparateAccount ? { checked: "checked" } : {}),
@@ -401,12 +481,63 @@ function targetCard(target, index) {
     sepFields = el("div", {}, [userInput, passInput]);
   }
 
+  const envSection = envVarsSection(target, index);
+
+  const passengerEnvNote = isBackend && (target.env || []).length
+    ? el("p", { class: "hint" }, ["These also need to be set in cPanel → Setup Node.js App → Environment variables, then restart. FTPilot can't set server-side env over FTP."])
+    : null;
+
   return el("div", { class: "target" }, [
     head, nameInput, cwdField,
     el("div", { class: "detect-row" }, [el("div", {}, [buildInput]), detectBtn]),
     localDirField, remoteDirInput,
-    backendRow, restartInput,
     sepRow, sepFields,
+    envSection, passengerEnvNote,
+    advToggle, advancedSection,
+  ]);
+}
+
+function envVarRow(target, targetIndex, envVar, envIndex) {
+  const targetKey = target.name || ("target_" + targetIndex);
+  const keyInput = el("input", {
+    type: "text", value: envVar.key || "", placeholder: "VITE_API_URL",
+    oninput: (e) => { envVar.key = e.target.value; },
+  });
+  const secretToggle = el("input", {
+    type: "checkbox", ...(envVar.secret ? { checked: "checked" } : {}),
+    onchange: (e) => { envVar.secret = e.target.checked; if (!e.target.checked) envVar.value = envVar.value || ""; render(); },
+  });
+  const valueInput = envVar.secret
+    ? el("input", {
+        type: "password",
+        value: (envSecrets[targetKey] && envSecrets[targetKey][envVar.key]) || "",
+        placeholder: "blank = keep existing",
+        oninput: (e) => {
+          if (!envSecrets[targetKey]) envSecrets[targetKey] = {};
+          envSecrets[targetKey][envVar.key] = e.target.value;
+        },
+      })
+    : el("input", {
+        type: "text", value: envVar.value || "", placeholder: "value",
+        oninput: (e) => { envVar.value = e.target.value; },
+      });
+  const removeBtn = el("button", {
+    class: "remove-btn", onclick: () => { target.env.splice(envIndex, 1); render(); },
+  }, ["✕"]);
+
+  return el("div", { class: "env-row" }, [keyInput, secretToggle, valueInput, removeBtn]);
+}
+
+function envVarsSection(target, targetIndex) {
+  if (!target.env) target.env = [];
+  const rows = target.env.map((v, i) => envVarRow(target, targetIndex, v, i));
+  const addBtn = el("button", {
+    class: "secondary inline-btn",
+    onclick: () => { target.env.push({ key: "", value: "", secret: false }); render(); },
+  }, ["+ Add env var"]);
+  return el("div", { class: "env-section" }, [
+    el("label", {}, ["Environment variables for this build (checkbox = secret, stored outside config.json)"]),
+    ...rows, addBtn,
   ]);
 }
 
@@ -423,6 +554,9 @@ function targetSummaryBlock(t) {
   ];
   if (t.restartFile) fields.push(summaryField("Restart file", t.restartFile));
   if (t.ftpUser) fields.push(summaryField("FTP account", t.ftpUser));
+  if (t.env && t.env.length) {
+    fields.push(summaryField("Env vars", t.env.map((v) => v.key + (v.secret ? " (secret)" : "")).join(", ")));
+  }
   return el("div", { class: "target-block" }, [el("div", {}, [el("strong", {}, [t.name || "(unnamed target)"])]), ...fields]);
 }
 
@@ -440,7 +574,12 @@ function renderConfirmSave() {
   ]);
   root.appendChild(box);
   if (!cfg.targets.length) root.appendChild(el("p", { class: "empty" }, ["No targets configured — you can still save, but Deploy will have nothing to do."]));
-  root.appendChild(el("button", { onclick: () => { post({ type: "saveConfig", config: stripConfig(cfg), defaultUser, defaultPassword, targetCreds }); defaultPassword = ""; for (const k in targetCreds) targetCreds[k].password = ""; } }, ["✓ Confirm & Save"]));
+  root.appendChild(el("button", { onclick: () => {
+    post({ type: "saveConfig", config: stripConfig(cfg), defaultUser, defaultPassword, targetCreds, envSecrets });
+    defaultPassword = "";
+    for (const k in targetCreds) targetCreds[k].password = "";
+    for (const t in envSecrets) { for (const k in envSecrets[t]) envSecrets[t][k] = ""; }
+  } }, ["✓ Confirm & Save"]));
   root.appendChild(el("button", { class: "secondary", onclick: () => { view = "form"; render(); } }, ["← Back to Edit"]));
 }
 
@@ -454,10 +593,29 @@ function renderConfirmDeploy(isFull) {
   const box = el("div", { class: "summary" }, [
     summaryField("Branch", cfg.deployBranch),
     summaryField("Host", cfg.host + ":" + cfg.port),
-    ...cfg.targets.map((t) => el("div", { class: "target-block" }, [summaryField(t.name || "(unnamed)", (t.localDir || "?") + " → " + (t.remoteDir || "?"))])),
+    ...cfg.targets.map((t) => {
+      const rows = [summaryField(t.name || "(unnamed)", (t.localDir || "?") + " → " + (t.remoteDir || "?"))];
+      if (t.env && t.env.length) {
+        rows.push(summaryField("Env", t.env.map((v) => v.key + (v.secret ? " (secret)" : "")).join(", ")));
+      }
+      return el("div", { class: "target-block" }, rows);
+    }),
   ]);
   root.appendChild(box);
   root.appendChild(el("button", { onclick: () => { post({ type: isFull ? "fullRedeploy" : "deploy" }); view = "form"; render(); } }, [isFull ? "✓ Confirm Full Re-upload" : "✓ Confirm Deploy"]));
+  root.appendChild(el("button", { class: "secondary", onclick: () => { view = "form"; render(); } }, ["Cancel"]));
+}
+
+function renderConfirmBackup() {
+  const root = document.getElementById("root");
+  root.innerHTML = "";
+  root.appendChild(el("h3", {}, ["Confirm Backup"]));
+  root.appendChild(el("p", { class: "hint" }, ["Downloads every target's current remote files and saves a compressed .zip locally under .ftbdeploy/backups/ — nothing on the server is changed."]));
+  const box = el("div", { class: "summary" }, [
+    ...cfg.targets.map((t) => el("div", { class: "target-block" }, [summaryField(t.name || "(unnamed)", t.remoteDir || "?")])),
+  ]);
+  root.appendChild(box);
+  root.appendChild(el("button", { onclick: () => { post({ type: "backup" }); view = "form"; render(); } }, ["✓ Confirm Backup"]));
   root.appendChild(el("button", { class: "secondary", onclick: () => { view = "form"; render(); } }, ["Cancel"]));
 }
 
@@ -468,6 +626,8 @@ function stripConfig(c) {
     if (t.cwd) clean.cwd = t.cwd;
     if (t.restartFile) clean.restartFile = t.restartFile;
     if (t.ftpUser) clean.ftpUser = t.ftpUser;
+    const env = (t.env || []).filter((v) => v.key).map((v) => v.secret ? { key: v.key, secret: true } : { key: v.key, value: v.value || "" });
+    if (env.length) clean.env = env;
     return clean;
   });
   return { deployBranch: c.deployBranch, host: c.host, port: c.port, secure: c.secure, uploadMode: c.uploadMode, targets };
@@ -483,6 +643,7 @@ function render() {
   if (!cfg) cfg = defaultConfig();
 
   if (view === "confirmSave") return renderConfirmSave();
+  if (view === "confirmBackup") return renderConfirmBackup();
   if (view === "confirmDeploy") return renderConfirmDeploy(false);
   if (view === "confirmFull") return renderConfirmDeploy(true);
 
@@ -534,6 +695,7 @@ function render() {
   ]);
 
   const saveBtn = el("button", { onclick: () => { view = "confirmSave"; render(); } }, ["Save Config…"]);
+  const backupBtn = el("button", { class: "secondary", onclick: () => { view = "confirmBackup"; render(); } }, ["📦 Backup Server…"]);
   const deployBtn = el("button", { onclick: () => { view = "confirmDeploy"; render(); } }, ["☁ Deploy / Redeploy…"]);
   const fullBtn = el("button", { class: "secondary", onclick: () => { view = "confirmFull"; render(); } }, ["Force Full Re-upload…"]);
   const jsonBtn = el("button", { class: "link", onclick: () => post({ type: "openConfigJson" }) }, ["Open config.json"]);
@@ -542,6 +704,7 @@ function render() {
   root.appendChild(credsSection);
   root.appendChild(targetsSection);
   root.appendChild(saveBtn);
+  root.appendChild(backupBtn);
   root.appendChild(deployBtn);
   root.appendChild(fullBtn);
   root.appendChild(jsonBtn);

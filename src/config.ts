@@ -1,6 +1,13 @@
 import * as fs from "fs";
 import * as path from "path";
 
+/** One env var this target's build needs. Plain values are committed in config.json; secret ones are looked up from SecretStorage at build time, keyed by target name + key. */
+export interface EnvVar {
+  key: string;
+  value?: string;
+  secret?: boolean;
+}
+
 export interface DeployTarget {
   /** Friendly name, e.g. "Frontend (app.example.com)" */
   name: string;
@@ -16,6 +23,8 @@ export interface DeployTarget {
   restartFile?: string;
   /** Override FTP username for this target only (e.g. a subdomain with its own scoped FTP account). Password is looked up under the same override username. */
   ftpUser?: string;
+  /** Env vars injected into buildCommand's process env (on top of the inherited shell env). Lets the same source build differently for prod than `npm run dev` does locally. */
+  env?: EnvVar[];
 }
 
 export interface DeployConfig {
@@ -56,7 +65,7 @@ export function loadConfig(workspaceRoot: string): DeployConfig {
   const p = configPath(workspaceRoot);
   if (!fs.existsSync(p)) {
     throw new Error(
-      "No .ftbdeploy/config.json found. Run 'FTPilot: Configure Project' first."
+      "No .ftbdeploy/config.json found. Open the FTPilot panel in the Activity Bar to set it up."
     );
   }
   const raw = fs.readFileSync(p, "utf8");

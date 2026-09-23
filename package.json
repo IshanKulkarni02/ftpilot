@@ -11,8 +11,12 @@
   "engines": {
     "vscode": "^1.85.0"
   },
-  "categories": ["Other"],
-  "activationEvents": ["onStartupFinished"],
+  "categories": [
+    "Other"
+  ],
+  "activationEvents": [
+    "onStartupFinished"
+  ],
   "main": "./out/extension.js",
   "icon": "media/icon.png",
   "contributes": {
@@ -21,6 +25,11 @@
         "command": "ftpilot.deploy",
         "title": "FTPilot: Deploy / Redeploy",
         "icon": "$(cloud-upload)"
+      },
+      {
+        "command": "ftpilot.backup",
+        "title": "FTPilot: Backup Server Now",
+        "icon": "$(archive)"
       },
       {
         "command": "ftpilot.fullRedeploy",
@@ -69,6 +78,7 @@
     "typescript": "^5.4.0"
   },
   "dependencies": {
+    "archiver": "^8.0.0",
     "basic-ftp": "^5.0.4"
   }
 }

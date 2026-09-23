@@ -76,6 +76,31 @@ export function detectOutputDir(cwd: string): string | undefined {
   return undefined;
 }
 
+/** Reads .env.example (falling back to .env) and returns the declared key names, in file order. */
+export function detectEnvKeys(cwd: string): string[] {
+  const candidates = [".env.example", ".env"];
+  let raw: string | undefined;
+  for (const name of candidates) {
+    const p = path.join(cwd, name);
+    if (fs.existsSync(p)) {
+      raw = fs.readFileSync(p, "utf8");
+      break;
+    }
+  }
+  if (!raw) return [];
+
+  const keys: string[] = [];
+  for (const line of raw.split(/\r?\n/)) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith("#")) continue;
+    const eq = trimmed.indexOf("=");
+    if (eq <= 0) continue;
+    const key = trimmed.slice(0, eq).trim();
+    if (/^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) keys.push(key);
+  }
+  return keys;
+}
+
 const IGNORE_TOP_LEVEL = new Set(["node_modules", ".git", ".vscode", ".ftbdeploy"]);
 
 export type DirSnapshot = Record<string, number>;
