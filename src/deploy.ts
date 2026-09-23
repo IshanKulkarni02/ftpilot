@@ -109,6 +109,8 @@ export async function runDeploy(
 
       output.appendLine(`\n=== Uploading: ${target.name} -> ${target.remoteDir} (${useFull ? "full" : "incremental"}) ===`);
 
+      let targetChanged = useFull;
+
       if (useFull) {
         const count = await ftpClient.uploadFull(client, localDir, target.remoteDir);
         totalUploaded += count;
@@ -125,10 +127,11 @@ export async function runDeploy(
         }
         totalUploaded += diff.toUpload.length;
         totalRemoved += diff.toRemove.length;
+        targetChanged = diff.toUpload.length > 0 || diff.toRemove.length > 0;
         output.appendLine(`Uploaded ${diff.toUpload.length}, removed ${diff.toRemove.length}.`);
       }
 
-      if (target.restartFile) {
+      if (target.restartFile && targetChanged) {
         output.appendLine(`Restarting app: touching ${target.restartFile}`);
         await ftpClient.touchRestartFile(client, target.restartFile);
       }
