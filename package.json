@@ -76,6 +76,35 @@
         "title": "FTPilot: Toggle Geek Mode"
       },
       {
+        "command": "ftpilot.setupAgentSkill",
+        "title": "FTPilot: Set Up AI Agent Deploy Skill (Claude Code, Copilot, …)",
+        "icon": "$(robot)"
+      },
+      {
+        "command": "ftpilot.scanRemoteStructure",
+        "title": "FTPilot: Scan Server Folder Structure",
+        "icon": "$(list-tree)"
+      },
+      {
+        "command": "ftpilot.setAppPassword",
+        "title": "FTPilot: Set/Change App Password",
+        "icon": "$(lock)"
+      },
+      {
+        "command": "ftpilot.configureAppLock",
+        "title": "FTPilot: App Lock Settings (Touch ID / Windows Hello / Password)",
+        "icon": "$(shield)"
+      },
+      {
+        "command": "ftpilot.removeAppPassword",
+        "title": "FTPilot: Remove App Password"
+      },
+      {
+        "command": "ftpilot.lockNow",
+        "title": "FTPilot: Lock Now",
+        "icon": "$(lock)"
+      },
+      {
         "command": "ftpilot.openDashboard",
         "title": "FTPilot: Open Geek Mode Dashboard",
         "icon": "$(dashboard)"
@@ -96,6 +125,13 @@
           "id": "ftpilotPanel",
           "name": "FTPilot",
           "type": "webview"
+        },
+        {
+          "id": "ftpilotDashboardView",
+          "name": "Geek Mode Dashboard",
+          "type": "webview",
+          "when": "config.ftpilot.geekMode",
+          "icon": "$(dashboard)"
         }
       ]
     },
@@ -115,6 +151,16 @@
           "command": "ftpilot.openHelp",
           "when": "view == ftpilotPanel",
           "group": "navigation@2"
+        },
+        {
+          "command": "ftpilot.configureAppLock",
+          "when": "view == ftpilotPanel",
+          "group": "navigation@3"
+        },
+        {
+          "command": "ftpilot.openDashboard",
+          "when": "view == ftpilotDashboardView",
+          "group": "navigation@0"
         }
       ],
       "commandPalette": [
@@ -134,7 +180,31 @@
         "ftpilot.geekMode": {
           "type": "boolean",
           "default": false,
-          "markdownDescription": "**Geek Mode**: open a live dashboard (gauges, throughput and connection charts, per-file timings, event log) whenever a deploy starts. Off by default; when off, all dashboard entry points are hidden."
+          "markdownDescription": "**Geek Mode**: adds a live dashboard tab (gauges, throughput and connection charts, per-file timings, backup/rollback status, event log) to the FTPilot sidebar, visible by default whenever a deploy, backup, preview or rollback runs. Use the full-screen button on the tab to pop it out into a bigger editor tab. Off by default; when off, the tab and all other dashboard entry points are hidden."
+        },
+        "ftpilot.requireAuth": {
+          "type": "boolean",
+          "default": true,
+          "markdownDescription": "**App Lock**: require Touch ID / Windows Hello (or an app password) before deploying, rolling back, backing up, connecting, or changing a saved FTP login / secret env value. Protects against someone else using your unlocked machine — separate from the OS-level encryption `ftpilot` already uses to store passwords (VS Code SecretStorage / OS keychain)."
+        },
+        "ftpilot.authMethod": {
+          "type": "string",
+          "enum": [
+            "auto",
+            "password"
+          ],
+          "enumDescriptions": [
+            "Try Touch ID (macOS) or Windows Hello (Windows) first; fall back to the app password if unavailable, unsupported, or canceled.",
+            "Always use the app password, even if biometrics are available."
+          ],
+          "default": "auto",
+          "markdownDescription": "How `ftpilot.requireAuth` is satisfied. Only used when App Lock is on."
+        },
+        "ftpilot.authTimeoutMinutes": {
+          "type": "number",
+          "default": 15,
+          "minimum": 0,
+          "markdownDescription": "Minutes after a successful unlock before FTPilot asks again. `0` asks every time. Resets on every VS Code restart (never persisted)."
         }
       }
     }

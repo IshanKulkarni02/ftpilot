@@ -119,6 +119,37 @@ export async function listRemoteFiles(client: ftp.Client, remoteDir: string): Pr
   return out;
 }
 
+/**
+ * Lists directory *names* only (no files) under `root`, down to `maxDepth` levels, for a
+ * human or an AI agent to eyeball and match against deploy targets — never file contents,
+ * never anything from outside the account this connection is scoped to. Capped at `maxEntries`
+ * total directories so a huge/junk-filled account can't hang the scan or blow up the output file.
+ * Hidden dirs (leading `.`) are skipped: cPanel/system housekeeping, never a deploy target.
+ */
+export async function listRemoteDirTree(client: ftp.Client, root: string, maxDepth = 3, maxEntries = 500): Promise<string[]> {
+  const base = root.replace(/\/+$/, "") || "/";
+  const dirs: string[] = [];
+  async function walk(rel: string, depth: number): Promise<void> {
+    if (dirs.length >= maxEntries) return;
+    let entries: ftp.FileInfo[];
+    try {
+      entries = await client.list(rel ? `${base}/${rel}` : base);
+    } catch (err) {
+      if (!rel && (err as { code?: unknown }).code === 550) return; // root not created yet
+      throw new Error(`couldn't list ${rel ? `${base}/${rel}` : base} on the server: ${(err as Error).message.trim()}`);
+    }
+    for (const e of entries) {
+      if (!e.isDirectory || e.name === "." || e.name === ".." || e.name.startsWith(".")) continue;
+      const child = rel ? `${rel}/${e.name}` : e.name;
+      dirs.push(child);
+      if (dirs.length >= maxEntries) return;
+      if (depth < maxDepth) await walk(child, depth + 1);
+    }
+  }
+  await walk("", 1);
+  return dirs;
+}
+
 /** Creates each remote directory (and parents) once; call before parallel uploads so connections never race on MKD. */
 export async function ensureDirs(client: ftp.Client, dirs: string[]): Promise<void> {
   const home = await client.pwd();

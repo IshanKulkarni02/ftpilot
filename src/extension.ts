@@ -1,13 +1,18 @@
 import * as vscode from "vscode";
+import * as fs from "fs";
+import * as path from "path";
 import { runDeploy, cancelDeploy, runRollback } from "./deploy";
 import { listSnapshots, rollbackableId } from "./rollback";
 import { DeployState } from "./progress";
 import { Dashboard } from "./dashboard";
 import { Metrics } from "./metrics";
 import { runBackup } from "./backup";
-import { setCredentials } from "./secrets";
-import { configPath, configExists, loadConfig } from "./config";
+import { setCredentials, getCredentials } from "./secrets";
+import { ensureAuthorized, setAppPassword, clearAppPassword, hasAppPassword, lockNow, configureAppLock, maybeShowFirstRunPrompt } from "./auth";
+import { configPath, configExists, loadConfig, remoteTreePath, ensureGitignored } from "./config";
 import { FtpilotPanel } from "./panel";
+import { setupAgentSkill, isAgentSkillUpToDate, agentSkillFilesExist, SKILL_RELATIVE_PATH, AGENTS_DOC_RELATIVE_PATH } from "./agentSkill";
+import * as ftpClient from "./ftpClient";
 
 let output: vscode.OutputChannel;
 let statusBar: vscode.StatusBarItem;
@@ -27,8 +32,13 @@ export function activate(context: vscode.ExtensionContext): void {
   context.subscriptions.push(output, statusBar);
 
   panel = new FtpilotPanel(context);
-  const dashboard = new Dashboard();
+  const dashboard = new Dashboard(context);
   context.subscriptions.push(dashboard);
+  context.subscriptions.push(
+    vscode.window.registerWebviewViewProvider(Dashboard.viewType, dashboard, {
+      webviewOptions: { retainContextWhenHidden: true },
+    })
+  );
   const onProgress = (state: DeployState, metrics?: Metrics) => {
     panel.reportProgress(state);
     dashboard.update(state, metrics);
@@ -49,6 +59,25 @@ export function activate(context: vscode.ExtensionContext): void {
       void vscode.window.showInformationMessage(on ? "FTPilot: Geek Mode on. The dashboard opens when a deploy starts." : "FTPilot: Geek Mode off.");
     }),
     vscode.workspace.onDidChangeConfiguration((e) => { if (e.affectsConfiguration("ftpilot.geekMode")) panel.refresh(); }),
+    vscode.commands.registerCommand("ftpilot.setAppPassword", async () => {
+      await setAppPassword(context);
+    }),
+    vscode.commands.registerCommand("ftpilot.configureAppLock", async () => {
+      await configureAppLock(context);
+    }),
+    vscode.commands.registerCommand("ftpilot.removeAppPassword", async () => {
+      if (!(await hasAppPassword(context))) {
+        void vscode.window.showInformationMessage("FTPilot: no app password is set.");
+        return;
+      }
+      if (!(await ensureAuthorized(context, "Remove the FTPilot app password"))) return;
+      await clearAppPassword(context);
+      void vscode.window.showInformationMessage("FTPilot: app password removed. Touch ID / Windows Hello (if available) will be used instead.");
+    }),
+    vscode.commands.registerCommand("ftpilot.lockNow", () => {
+      lockNow();
+      void vscode.window.showInformationMessage("FTPilot: locked. The next deploy or credential change will ask for authentication.");
+    }),
     vscode.commands.registerCommand("ftpilot.cancelDeploy", () => cancelDeploy()),
     // From the panel (already confirmed there) or the Command Palette (pick + confirm here).
     vscode.commands.registerCommand("ftpilot.rollback", async (args?: { snapshotId?: string; confirmed?: boolean }) => {
@@ -158,6 +187,7 @@ export function activate(context: vscode.ExtensionContext): void {
           })
         : PROJECT_LOGIN;
       if (!picked) return;
+      if (!(await ensureAuthorized(context, "Change the saved FTP login"))) return;
       const account = picked === PROJECT_LOGIN ? "default" : picked;
       const user = await vscode.window.showInputBox({ prompt: "FTP username" });
       if (!user) return;
@@ -181,8 +211,116 @@ export function activate(context: vscode.ExtensionContext): void {
       }
       const doc = await vscode.workspace.openTextDocument(configPath(root));
       await vscode.window.showTextDocument(doc);
+    }),
+
+    vscode.commands.registerCommand("ftpilot.setupAgentSkill", async () => {
+      const root = getWorkspaceRoot();
+      if (!root) {
+        void vscode.window.showErrorMessage("FTPilot: open a folder/workspace first.");
+        return;
+      }
+      if (isAgentSkillUpToDate(root)) {
+        void vscode.window.showInformationMessage("FTPilot: the AI agent deploy skill is already set up and up to date.");
+        return;
+      }
+      let overwrite = true;
+      if (agentSkillFilesExist(root)) {
+        const choice = await vscode.window.showWarningMessage(
+          `FTPilot: ${SKILL_RELATIVE_PATH} and/or ${AGENTS_DOC_RELATIVE_PATH} already exist with different content. Overwrite with the latest FTPilot instructions?`,
+          { modal: true },
+          "Overwrite"
+        );
+        if (choice !== "Overwrite") return;
+        overwrite = true;
+      }
+      const { results, pointers } = setupAgentSkill(root, overwrite);
+      const written = results.filter((r) => r.action === "created" || r.action === "updated").map((r) => r.relativePath);
+      const linked = pointers.filter((p) => p.action === "updated").map((p) => p.relativePath);
+      const summary = [
+        written.length ? `Wrote ${written.join(" and ")}.` : "Already up to date.",
+        linked.length ? `Linked from ${linked.join(" and ")}.` : "",
+        "Commit these so every contributor's coding agent gets it. Say \"ready to deploy\" to a Claude Code session in this project to try it.",
+      ].filter(Boolean).join(" ");
+      void vscode.window.showInformationMessage(`FTPilot: ${summary}`, "Open SKILL.md").then((c) => {
+        if (c) void vscode.workspace.openTextDocument(vscode.Uri.joinPath(vscode.Uri.file(root), SKILL_RELATIVE_PATH)).then((d) => vscode.window.showTextDocument(d));
+      });
+      panel.refresh();
+    }),
+
+    // Folder *names* only, never file contents or anything outside the FTP account(s) already
+    // saved for this project — lets a coding agent match server folders to targets without ever
+    // seeing the credentials that produced the listing.
+    vscode.commands.registerCommand("ftpilot.scanRemoteStructure", async () => {
+      const root = getWorkspaceRoot();
+      if (!root) {
+        void vscode.window.showErrorMessage("FTPilot: open a folder/workspace first.");
+        return;
+      }
+      let config;
+      try {
+        config = loadConfig(root, false);
+      } catch (err) {
+        void vscode.window.showErrorMessage(`FTPilot: ${(err as Error).message}`);
+        return;
+      }
+      if (!config.host) {
+        void vscode.window.showWarningMessage("FTPilot: set the FTP host in the panel first, then scan.");
+        return;
+      }
+      if (!(await ensureAuthorized(context, "Scan the server's folder structure"))) return;
+
+      const accounts = ["default", ...new Set(config.targets.map((t) => t.ftpUser).filter((u): u is string => !!u))];
+      const scanned: Record<string, { dirs: string[] }> = {};
+      const problems: string[] = [];
+      await vscode.window.withProgress(
+        { location: vscode.ProgressLocation.Notification, title: "FTPilot: scanning server folder structure…" },
+        async () => {
+          for (const account of accounts) {
+            const creds = await getCredentials(context, root, account);
+            if (!creds) {
+              problems.push(`${account}: no saved credentials, skipped`);
+              continue;
+            }
+            let client: Awaited<ReturnType<typeof ftpClient.connect>> | undefined;
+            try {
+              client = await ftpClient.connect(config, creds);
+              scanned[account] = { dirs: await ftpClient.listRemoteDirTree(client, "/") };
+            } catch (err) {
+              problems.push(`${account}: ${(err as Error).message}`);
+            } finally {
+              client?.close();
+            }
+          }
+        }
+      );
+
+      if (!Object.keys(scanned).length) {
+        void vscode.window.showErrorMessage(`FTPilot: couldn't scan any account. ${problems.join(" ")}`);
+        return;
+      }
+
+      const outPath = remoteTreePath(root);
+      fs.mkdirSync(path.dirname(outPath), { recursive: true });
+      fs.writeFileSync(
+        outPath,
+        JSON.stringify({ scannedAt: new Date().toISOString(), host: config.host, accounts: scanned }, null, 2) + "\n",
+        "utf8"
+      );
+      // Reflects the live server layout at scan time and can go stale — not meant to be committed or shared.
+      ensureGitignored(root, ".ftbdeploy/remote-tree.json");
+
+      const dirCount = Object.values(scanned).reduce((n, a) => n + a.dirs.length, 0);
+      const summary =
+        `Scanned ${Object.keys(scanned).length} account(s), ${dirCount} folder(s) into .ftbdeploy/remote-tree.json.` +
+        (problems.length ? ` (${problems.join("; ")})` : "") +
+        ` Tell your coding agent to match it against your targets' remoteDir.`;
+      void vscode.window.showInformationMessage(`FTPilot: ${summary}`, "Open remote-tree.json").then((c) => {
+        if (c) void vscode.workspace.openTextDocument(outPath).then((d) => vscode.window.showTextDocument(d));
+      });
     })
   );
+
+  void maybeShowFirstRunPrompt(context);
 }
 
 export function deactivate(): void {

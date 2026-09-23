@@ -42,11 +42,25 @@ export function dashboardSections(s: DeployState, m: Metrics): Record<string, st
   const eta = running && lastFps > 0 && total > done ? `~${fmtMs(((total - done) / lastFps) * 1000)} left` : running ? "estimating…" : fmtMs(now) + " total";
   const errors = (s.retries ?? 0) + (s.error ? 1 : 0) + s.targets.filter((t) => t.health && !t.health.ok).length;
 
+  // Only present when "Save a rollback copy before each deploy" is on for this run — shown as
+  // its own gauge (not folded into the combined Progress %) so the backup step is visible on
+  // its own, not just implied by a slower overall bar.
+  const takingBackup = s.phase === "snapshot";
+  const backupDone = s.snapDone ?? 0;
+  const backupTotal = s.snapTotal ?? 0;
+  const backupGauge = backupTotal > 0
+    ? [gauge({
+        label: "Backup (rollback copy)", value: backupDone, max: backupTotal, display: `${backupDone} / ${backupTotal}`,
+        sub: takingBackup ? "downloading now…" : backupDone >= backupTotal ? "done" : "pending", status: takingBackup ? "warn" : backupDone >= backupTotal ? "ok" : undefined,
+      })]
+    : [];
+
   const gauges = [
     gauge({ label: "Files / sec", value: lastFps, max: Math.max(10, peakFps * 1.2), display: lastFps.toFixed(1), sub: `peak ${peakFps.toFixed(1)}` }),
     gauge({ label: unit.label.replace("/", " / "), value: lastMb, max: Math.max(peakMb * 1.2, 1e-9), display: (lastMb * unit.scale).toFixed(1), sub: `peak ${(peakMb * unit.scale).toFixed(1)}` }),
     gauge({ label: "Connections", value: s.connections, max: s.maxConnections ?? 8, display: `${s.connections} / ${s.maxConnections ?? 8}`, sub: `peak ${s.peakConnections ?? 0}` }),
     gauge({ label: "Progress", value: pct, max: 100, display: `${pct}%`, sub: `${done} / ${total} · ${eta}` }),
+    ...backupGauge,
     gauge({ label: "Avg file time", value: avgRecent, max: Math.max(500, percentile(allMs, 0.95) * 1.5), display: avgRecent ? fmtMs(avgRecent) : "–", sub: allMs.length ? `median ${fmtMs(percentile(allMs, 0.5))}` : "last 50 files" }),
     gauge({ label: "Errors / retries", value: errors, max: 10, display: String(errors), sub: s.error ? "run failed" : `${s.retries ?? 0} retries`, status: s.error ? "crit" : errors ? "warn" : "ok" }),
   ].join("");
@@ -90,6 +104,16 @@ export function dashboardSections(s: DeployState, m: Metrics): Record<string, st
   const events = [...s.events].reverse().slice(0, 60)
     .map((e) => `<li><span class="muted">${esc(fmtMs(e.t - s.startedAt))}</span> <span class="ev ev-${esc(e.kind)}">${esc(e.kind)}</span> ${esc(e.message)}</li>`).join("");
 
+  // A visible, human-readable line for the backup step itself (not just the gauge/chart numbers),
+  // and the same Roll Back action the sidebar offers, so Geek Mode doesn't need a switch back to
+  // the sidebar to see or undo what a deploy did. Kept forgiving like the sidebar's own button:
+  // the rollback command re-checks eligibility itself and reports a clear message if it's stale.
+  const actions = takingBackup
+    ? `<div class="backup-note"><span class="codicon codicon-archive"></span> Backing up the server's current files before uploading, so this deploy can be undone (${backupDone} / ${backupTotal})…</div>`
+    : !running && s.rollbackId
+      ? `<button class="action-btn ${s.healthFailed || s.phase === "failed" ? "danger" : "secondary"}" data-action="rollback"><span class="codicon codicon-discard"></span> Roll Back This Deploy</button>`
+      : "";
+
   const session: [string, string][] = [
     ["Run", s.kind + (s.dryRun ? " (preview)" : "")],
     ["Status", s.phase + (s.cancelled ? " (cancelled)" : "")],
@@ -108,6 +132,7 @@ export function dashboardSections(s: DeployState, m: Metrics): Record<string, st
 
   return {
     gauges,
+    actions,
     speed: timeSeries({ label: "files/s", points: fps, xMax: now, fmt: (v) => v.toFixed(v < 10 ? 1 : 0) }),
     mb: timeSeries({ label: unit.label, points: mb.map((p) => ({ t: p.t, v: p.v * unit.scale })), xMax: now, fmt: (v) => v.toFixed(v < 10 ? 1 : 0), color: "var(--s1)" }),
     mbTitle: `Throughput (${unit.label})`,
@@ -141,12 +166,24 @@ const PAGE_CSS = `
   * { box-sizing: border-box; }
   body { margin: 0; padding: 12px 16px 24px; font-family: var(--vscode-font-family); font-size: 13px; color: var(--ink); background: var(--surface); }
   header { display: flex; align-items: baseline; gap: 12px; margin-bottom: 10px; }
+  header .spacer { flex: 1; }
   h1 { font-size: 16px; font-weight: 600; margin: 0; }
+  .icon-btn { display: inline-flex; align-items: center; gap: 4px; background: transparent; border: none; color: var(--ink2); cursor: pointer; padding: 2px 4px; border-radius: 3px; font-family: inherit; font-size: 12px; }
+  .icon-btn:hover { color: var(--ink); background: var(--vscode-toolbar-hoverBackground, rgba(128,128,128,.15)); }
+  .actions:empty { display: none; }
+  .actions { margin-bottom: 12px; }
+  .backup-note { display: flex; align-items: center; gap: 6px; padding: 6px 10px; border: 1px solid var(--grid); border-radius: 2px; background: var(--vscode-editorWidget-background, transparent); color: var(--ink2); font-size: 12px; }
+  .action-btn { display: inline-flex; align-items: center; gap: 6px; padding: 6px 12px; border-radius: 2px; border: 1px solid var(--vscode-button-border, transparent); cursor: pointer; font-family: inherit; font-size: 12px; background: var(--vscode-button-secondaryBackground); color: var(--vscode-button-secondaryForeground); }
+  .action-btn:hover { background: var(--vscode-button-secondaryHoverBackground); }
+  .action-btn.danger { background: var(--vscode-errorForeground); color: #fff; }
   h2 { font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: .04em; color: var(--vscode-sideBarSectionHeader-foreground, var(--ink)); margin: 0 0 8px; }
   .muted { color: var(--muted); }
   .bad { color: var(--vscode-errorForeground); }
   .gauges { display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 8px; margin-bottom: 12px; }
-  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(420px, 1fr)); gap: 12px; }
+  /* min(420px, 100%) instead of a bare 420px: in the sidebar tab the container can be far
+     narrower than 420px, and a bare minmax() track floor forces horizontal scrolling instead
+     of just collapsing to one column the way it does in the full-screen editor tab. */
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(420px, 100%), 1fr)); gap: 12px; }
   .panel { border: 1px solid var(--vscode-panel-border, rgba(128,128,128,.2)); border-radius: 2px; padding: 10px 12px; min-width: 0; background: var(--vscode-editorWidget-background, transparent); }
   .panel.wide { grid-column: 1 / -1; }
   table { width: 100%; border-collapse: collapse; font-size: 12px; }
@@ -164,57 +201,100 @@ const PAGE_CSS = `
   dt { color: var(--ink2); } dd { margin: 0; font-variant-numeric: tabular-nums; }
 `;
 
-/** Geek Mode: a live dashboard for the running (or last) deploy, in an editor tab. */
-export class Dashboard implements vscode.Disposable {
+/**
+ * Geek Mode: a live dashboard for the running (or last) deploy/backup/rollback, shown two ways
+ * from one source of truth — a persistent tab in the FTPilot sidebar (visible by default
+ * whenever Geek Mode is on, so nothing needs to be opened to see it) and, on request, the same
+ * view "popped out" full screen into an editor tab (`open()` / the sidebar's own button).
+ */
+export class Dashboard implements vscode.Disposable, vscode.WebviewViewProvider {
+  static readonly viewType = "ftpilotDashboardView";
+
   private panel?: vscode.WebviewPanel;
+  private view?: vscode.WebviewView;
   private last?: { s: DeployState; m: Metrics };
   private timer?: NodeJS.Timeout;
+
+  constructor(private context: vscode.ExtensionContext) {}
 
   static enabled(): boolean {
     return vscode.workspace.getConfiguration("ftpilot").get<boolean>("geekMode", false);
   }
 
-  /** Called on every progress emit; opens the dashboard at the start of a run when Geek Mode is on. */
+  /** Called on every progress emit. Pushes to whichever of the sidebar tab / full-screen tab are currently open. */
   update(s: DeployState, m?: Metrics): void {
     if (!m) return;
-    const isNewRun = !this.last || this.last.s.startedAt !== s.startedAt;
     this.last = { s, m };
-    if (isNewRun && Dashboard.enabled()) this.open(true);
     // ~2 fps is plenty for charts and keeps SVG re-rendering cheap.
-    if (this.panel && !this.timer) this.timer = setTimeout(() => { this.timer = undefined; this.push(); }, 500);
+    if ((this.panel || this.view) && !this.timer) this.timer = setTimeout(() => { this.timer = undefined; this.pushAll(); }, 500);
   }
 
+  /** Opens (or reveals) the full-screen editor-tab copy of the dashboard. */
   open(preserveFocus = false): void {
     if (this.panel) {
       this.panel.reveal(undefined, preserveFocus);
-      this.push();
+      this.pushTo(this.panel.webview);
       return;
     }
     this.panel = vscode.window.createWebviewPanel("ftpilotDashboard", "FTPilot Dashboard", { viewColumn: vscode.ViewColumn.Beside, preserveFocus }, {
       enableScripts: true,
       retainContextWhenHidden: true,
+      localResourceRoots: [this.codiconRoot()],
     });
-    this.panel.webview.html = this.shell();
+    this.panel.webview.html = this.shell(this.panel.webview, false);
+    this.panel.webview.onDidReceiveMessage((msg) => this.handleMessage(msg));
     this.panel.onDidDispose(() => { this.panel = undefined; });
-    this.push();
+    this.pushTo(this.panel.webview);
   }
 
-  private push(): void {
-    if (!this.panel) return;
+  /** vscode.WebviewViewProvider: resolves the sidebar tab. */
+  resolveWebviewView(webviewView: vscode.WebviewView): void {
+    this.view = webviewView;
+    webviewView.webview.options = { enableScripts: true, localResourceRoots: [this.codiconRoot()] };
+    webviewView.webview.html = this.shell(webviewView.webview, true);
+    webviewView.webview.onDidReceiveMessage((msg) => this.handleMessage(msg));
+    webviewView.onDidDispose(() => { this.view = undefined; });
+    this.pushTo(webviewView.webview);
+  }
+
+  private handleMessage(msg: { type?: string }): void {
+    if (msg?.type === "rollback") {
+      if (this.last?.s.rollbackId) void vscode.commands.executeCommand("ftpilot.rollback", { snapshotId: this.last.s.rollbackId });
+    } else if (msg?.type === "openFull") {
+      this.open();
+    }
+  }
+
+  private codiconRoot(): vscode.Uri {
+    return vscode.Uri.joinPath(this.context.extensionUri, "node_modules", "@vscode", "codicons", "dist");
+  }
+
+  private pushAll(): void {
+    if (this.panel) this.pushTo(this.panel.webview);
+    if (this.view) this.pushTo(this.view.webview);
+  }
+
+  private pushTo(webview: vscode.Webview): void {
     if (!this.last) {
-      void this.panel.webview.postMessage({ type: "sections", sections: { title: "No deploy yet", gauges: `<p class="muted">Start a deploy or preview; its live metrics appear here.</p>` } });
+      void webview.postMessage({ type: "sections", sections: { title: "No deploy yet", gauges: `<p class="muted">Start a deploy, preview, backup or rollback; its live metrics appear here.</p>` } });
       return;
     }
-    void this.panel.webview.postMessage({ type: "sections", sections: dashboardSections(this.last.s, this.last.m) });
+    void webview.postMessage({ type: "sections", sections: dashboardSections(this.last.s, this.last.m) });
   }
 
-  private shell(): string {
+  private shell(webview: vscode.Webview, isSidebar: boolean): string {
     const nonce = Math.random().toString(36).slice(2) + Math.random().toString(36).slice(2);
+    const codiconCss = webview.asWebviewUri(vscode.Uri.joinPath(this.codiconRoot(), "codicon.css"));
     const box = (id: string, title: string, wide = false) => `<section class="panel${wide ? " wide" : ""}"><h2>${title}</h2><div data-s="${id}"></div></section>`;
+    const fullScreenBtn = isSidebar
+      ? `<button class="icon-btn" data-action="openFull" title="Open in full screen"><span class="codicon codicon-screen-full"></span></button>`
+      : "";
     return `<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'nonce-${nonce}';">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline' ${webview.cspSource}; font-src ${webview.cspSource}; script-src 'nonce-${nonce}';">
+<link rel="stylesheet" href="${codiconCss}">
 <style>${THEME_CSS}${PAGE_CSS}${CHART_CSS}</style></head><body>
-<header><h1>FTPilot Dashboard</h1><span class="muted" data-s="title"></span></header>
+<header><h1>FTPilot Dashboard</h1><span class="muted" data-s="title"></span><span class="spacer"></span>${fullScreenBtn}</header>
+<div class="actions" data-s="actions"></div>
 <div class="gauges" data-s="gauges"></div>
 <div class="grid">
   ${box("speed", "Files per second")}
@@ -233,6 +313,11 @@ export class Dashboard implements vscode.Disposable {
   ${box("build", "Build output (tail)")}
 </div>
 <script nonce="${nonce}">
+  const vscodeApi = acquireVsCodeApi();
+  document.addEventListener("click", (e) => {
+    const btn = e.target.closest("[data-action]");
+    if (btn) vscodeApi.postMessage({ type: btn.dataset.action });
+  });
   // Cheap fingerprint of the last HTML per section (not a second full copy of it in the DOM).
   const seen = {};
   function hash(s) { let h = 5381; for (let i = 0; i < s.length; i++) h = ((h << 5) + h + s.charCodeAt(i)) | 0; return s.length + ":" + h; }

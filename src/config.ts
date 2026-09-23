@@ -81,6 +81,22 @@ export function manifestPath(workspaceRoot: string): string {
   return path.join(configDir(workspaceRoot), "manifest.json");
 }
 
+export function remoteTreePath(workspaceRoot: string): string {
+  return path.join(configDir(workspaceRoot), "remote-tree.json");
+}
+
+/** Appends a `.gitignore` entry (relative to workspaceRoot, posix-style) if it isn't already there. Used for generated, per-machine or live-server-derived files that shouldn't be committed. */
+export function ensureGitignored(workspaceRoot: string, entry: string): void {
+  const gitignorePath = path.join(workspaceRoot, ".gitignore");
+  let existing = "";
+  if (fs.existsSync(gitignorePath)) {
+    existing = fs.readFileSync(gitignorePath, "utf8");
+    if (existing.split(/\r?\n/).some((line) => line.trim() === entry)) return;
+  }
+  const prefix = existing && !existing.endsWith("\n") ? "\n" : "";
+  fs.writeFileSync(gitignorePath, `${existing}${prefix}${entry}\n`, "utf8");
+}
+
 export function configExists(workspaceRoot: string): boolean {
   return fs.existsSync(configPath(workspaceRoot));
 }

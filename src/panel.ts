@@ -1,15 +1,17 @@
 import * as vscode from "vscode";
 import * as fs from "fs";
 import * as path from "path";
-import { DeployConfig, configExists, loadConfig, saveConfig, validateTargets } from "./config";
+import { DeployConfig, configExists, loadConfig, saveConfig, validateTargets, ensureGitignored } from "./config";
 import * as ftp from "basic-ftp";
 import { setCredentials, setEnvSecret, getCredentials, getEnvSecret, getLoginStatus } from "./secrets";
+import { ensureAuthorized } from "./auth";
 import { getCurrentBranch } from "./git";
 import { DeployState, slimState } from "./progress";
 import { rollbackableId } from "./rollback";
 import { checkHealth, HealthResult } from "./health";
 import * as ftpClient from "./ftpClient";
 import { detectProject } from "./detect";
+import { isAgentSkillUpToDate } from "./agentSkill";
 
 type TargetCreds = Record<string, { user: string; password: string }>;
 /** Target name -> env var key -> value, for secret-flagged env vars being set/rotated. */
@@ -48,6 +50,8 @@ type InMsg =
   | { type: "deployTarget"; id: string; name: string }
   | { type: "backup" }
   | { type: "openConfigJson" }
+  | { type: "setupAgentSkill" }
+  | { type: "scanRemoteStructure" }
   | { type: "detect"; index: number; cwd: string }
   | { type: "listDirs"; forPath: string }
   | { type: "browse"; index: number; field: "cwd" | "localDir"; from?: string };
@@ -80,6 +84,8 @@ type InitMeta = {
   geekMode: boolean;
   /** Snapshot id of the one deploy that can be rolled back now (the most recent), if any. */
   rollbackable?: string;
+  /** Whether the "ready to deploy" Claude Code skill / AGENTS.md doc is already written and current. */
+  agentSkillSetUp: boolean;
 };
 
 type ConnState = {
@@ -110,15 +116,7 @@ const IGNORE_DIR_NAMES = new Set(["node_modules", ".git", ".vscode", ".ftbdeploy
  * each other if shared. Make sure it's gitignored the first time we save.
  */
 function ensureManifestGitignored(workspaceRoot: string): void {
-  const entry = ".ftbdeploy/manifest.json";
-  const gitignorePath = path.join(workspaceRoot, ".gitignore");
-  let existing = "";
-  if (fs.existsSync(gitignorePath)) {
-    existing = fs.readFileSync(gitignorePath, "utf8");
-    if (existing.split(/\r?\n/).some((line) => line.trim() === entry)) return;
-  }
-  const prefix = existing && !existing.endsWith("\n") ? "\n" : "";
-  fs.writeFileSync(gitignorePath, `${existing}${prefix}${entry}\n`, "utf8");
+  ensureGitignored(workspaceRoot, ".ftbdeploy/manifest.json");
 }
 
 /** workspaceState key for unsaved configuration edits, so they survive the tab being closed or VS Code reloading. Never holds secrets — those are only entered via native password input boxes. */
@@ -236,6 +234,7 @@ export class FtpilotPanel implements vscode.WebviewViewProvider {
       envSecretsSet,
       geekMode: vscode.workspace.getConfiguration("ftpilot").get<boolean>("geekMode", false),
       rollbackable: rollbackableId(root),
+      agentSkillSetUp: isAgentSkillUpToDate(root),
     };
   }
 
@@ -360,6 +359,7 @@ export class FtpilotPanel implements vscode.WebviewViewProvider {
 
       case "testFtps": {
         if (!root) return;
+        if (!(await ensureAuthorized(this.context, "Test an FTPS login"))) return;
         const creds = await getCredentials(this.context, root, "default");
         if (!creds) {
           reply({ type: "ftpsResult", ok: false, message: "Save your FTP login first (Update Credentials)." });
@@ -425,8 +425,18 @@ export class FtpilotPanel implements vscode.WebviewViewProvider {
         await vscode.commands.executeCommand("ftpilot.openHelp");
         return;
 
+      case "setupAgentSkill":
+        await vscode.commands.executeCommand("ftpilot.setupAgentSkill");
+        this.postInit();
+        return;
+
+      case "scanRemoteStructure":
+        await vscode.commands.executeCommand("ftpilot.scanRemoteStructure");
+        return;
+
       case "updateCredentials": {
         if (!root) return;
+        if (!(await ensureAuthorized(this.context, "Change the saved FTP login"))) return;
         const isProject = msg.account === "default";
         let user = msg.account;
         if (isProject) {
@@ -457,6 +467,7 @@ export class FtpilotPanel implements vscode.WebviewViewProvider {
 
       case "setEnvSecret": {
         if (!root) return;
+        if (!(await ensureAuthorized(this.context, "Change a saved secret env value"))) return;
         const value = await vscode.window.showInputBox({
           title: "FTPilot: Set Secret Value",
           prompt: `Value for ${msg.key} (stored in VS Code SecretStorage, never in config.json)`,
@@ -471,7 +482,9 @@ export class FtpilotPanel implements vscode.WebviewViewProvider {
       }
 
       case "connect":
-        if (root) await this.connectAndCheck(root, msg.config, msg.stay);
+        if (root && (await ensureAuthorized(this.context, "Connect with the saved FTP login"))) {
+          await this.connectAndCheck(root, msg.config, msg.stay);
+        }
         return;
 
       case "disconnect":
@@ -534,6 +547,14 @@ export class FtpilotPanel implements vscode.WebviewViewProvider {
         const problems = validateTargets(msg.config.targets);
         if (problems.length) {
           reply({ type: "error", message: "Not saved. " + problems.join(" ") });
+          return;
+        }
+        const changingSecrets =
+          !!(msg.defaultUser && msg.defaultPassword) ||
+          !!(msg.targetCreds && Object.values(msg.targetCreds).some((c) => c.user && c.password)) ||
+          !!(msg.envSecrets && Object.values(msg.envSecrets).some((vars) => Object.values(vars).some((v) => v)));
+        if (changingSecrets && !(await ensureAuthorized(this.context, "Save a new or changed FTP login / secret"))) {
+          reply({ type: "error", message: "Not saved. Authentication required to change a saved login or secret." });
           return;
         }
         try {
@@ -1124,6 +1145,14 @@ function statusNotice() {
   return lastStatus ? notice(lastStatus.kind, STATUS_ICON[lastStatus.kind] || "info", [lastStatus.text]) : null;
 }
 
+// Shown until the user (or an agent) runs the setup once; disappears once meta.agentSkillSetUp is true.
+function agentSkillNotice() {
+  if (!meta || meta.agentSkillSetUp) return null;
+  return notice("info", "robot", ["Let Claude Code / Copilot fill in new deploy targets for you"], [
+    link("Set Up AI Agent Skill", () => post({ type: "setupAgentSkill" })),
+  ]);
+}
+
 function stripConfig(c) {
   const targets = c.targets.map((t) => {
     const clean = { id: t.id, name: t.name, localDir: t.localDir, remoteDir: t.remoteDir };
@@ -1346,11 +1375,18 @@ function kv(icon, label, value, extra) {
 function opsConnActions() {
   const busy = conn.state === "connecting";
   const connected = conn.state === "connected";
+  const hasLogin = !!(meta && meta.login && meta.login.hasPassword);
   return el("span", { class: "acts", id: "conn-acts" }, [
     iconBtn("pulse", "Test Connection", () => connect(false), busy),
     connected
       ? iconBtn("debug-disconnect", "Disconnect", () => post({ type: "disconnect" }))
       : iconBtn("plug", "Connect and stay connected", () => connect(true), busy),
+    iconBtn(
+      "list-tree",
+      hasLogin ? "Scan server folder structure, for a coding agent to match against your targets" : "Set FTP credentials first",
+      () => post({ type: "scanRemoteStructure" }),
+      !hasLogin
+    ),
     iconBtn("settings-gear", "Edit Connection", () => post({ type: "openInEditor" })),
   ]);
 }
@@ -1403,6 +1439,8 @@ function renderOps(root) {
   if (hasDraft) {
     root.appendChild(notice("warn", "warning", ["Unsaved configuration changes"], [link("Review", () => post({ type: "openInEditor" }))]));
   }
+  const agn = agentSkillNotice();
+  if (agn) root.appendChild(agn);
   const st = statusNotice();
   if (st) root.appendChild(st);
   const pc = progressCard();
@@ -1629,6 +1667,8 @@ function renderConfig(root) {
       link("Save", () => { view = "confirmSave"; render(); }),
     ]));
   }
+  const agn = agentSkillNotice();
+  if (agn) root.appendChild(agn);
   const st = statusNotice();
   if (st) root.appendChild(st);
 

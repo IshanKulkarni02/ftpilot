@@ -56,21 +56,40 @@ Open it with the gear icon. Changes are kept as a draft until you **Save Configu
 
 ## Geek Mode (optional, off by default)
 
-Turn on with Command Palette → **FTPilot: Toggle Geek Mode** (or Settings → `ftpilot.geekMode`). While it's off, no dashboard buttons appear anywhere.
+Turn on with Command Palette → **FTPilot: Toggle Geek Mode** (or Settings → `ftpilot.geekMode`). While it's off, no dashboard tab or buttons appear anywhere.
 
-When on, a live **FTPilot Dashboard** opens beside your editor whenever a deploy, preview or rollback starts (reopen it from the dashboard icon in the sidebar title bar or on the progress card):
+When on, a **Geek Mode Dashboard** tab appears in the FTPilot sidebar by itself — no need to open anything — and starts filling in live as soon as a deploy, backup, preview or rollback runs. Click the full-screen icon on that tab (or **FTPilot: Open Geek Mode Dashboard**) to pop the same live view out into a bigger editor tab instead.
 
-- **Meters:** files/sec, throughput, connections in use, progress + ETA, average file time, errors/retries
+- **Meters:** files/sec, throughput, connections in use, progress + ETA, average file time, errors/retries, and — whenever "Save a rollback copy before each deploy" is on for that run — a dedicated **Backup (rollback copy)** meter, separate from overall progress.
+- **While a backup/rollback copy is being taken**, a callout above the meters spells it out in plain language ("Backing up the server's current files before uploading… (N / M)"), and the "Where the time went" chart marks that step in its own color.
+- **Roll Back This Deploy** button, right on the dashboard, as soon as a run finishes — the same action as the sidebar's own button, so Geek Mode doesn't need a trip back to the sidebar to undo a bad deploy.
 - **Charts:** files/sec and throughput over time, connections over time (with back-off markers), where the time went per target, connection lanes (every file on every connection), time vs file size, file-time distribution (median / p95)
 - **Tables:** per target, by file type, slowest 10, largest 10, connection events, session details, build output tail
 
 Hover any mark for exact values. The same charts are included in every deploy report, so they survive **Print → Save as PDF**.
 
+## App Lock (on by default)
+
+Protects against someone else picking up your unlocked laptop and clicking Deploy, or reading which logins are saved. On by default (`ftpilot.requireAuth`); asks again 15 minutes after your last unlock, or every time if you set `ftpilot.authTimeoutMinutes` to `0`.
+
+- Gates: Deploy, Full Re-upload, Preview, Backup, Roll Back, Connect / Test, Test FTPS, and saving a new or changed FTP login or secret env value. Just *viewing* the configuration (including whether a login is saved) doesn't ask.
+- **macOS:** Touch ID (or your configured biometric), via the same LocalAuthentication prompt macOS shows for System Settings.
+- **Windows:** Windows Hello.
+- **App password fallback:** used automatically if biometrics aren't available/enrolled, and always if you set the method to "App password only". It's a separate password from any FTP login, stored only as a salted hash (never in plain text, and never able to be read back — even by FTPilot).
+- Turn off entirely with the "Require authentication…" toggle below — not recommended if anyone else can use this machine while it's unlocked.
+
+### Changing App Lock settings
+
+The shield icon in the panel title bar (or **FTPilot: App Lock Settings**) opens one menu for everything: turn App Lock on/off, switch between Touch ID/Windows Hello and app-password-only, set/change/remove the app password, change how long before it asks again, or lock right now. Picking an option applies it and reopens the menu so you can change more than one thing at once — press Escape to close it.
+
+The first time FTPilot activates in a fresh install, it offers to open this menu directly — shown once, never again after that regardless of what you pick.
+
 ## Where things are stored
 
 - `.ftbdeploy/config.json`: settings, no secrets. Safe to commit.
 - `.ftbdeploy/manifest.json`: what was uploaded last time. Gitignored automatically.
-- Passwords and secret env values: VS Code SecretStorage, per project folder.
+- Passwords and secret env values: VS Code SecretStorage, per project folder — this is not a plain file. VS Code encrypts it with your OS's own credential store (macOS Keychain, Windows Credential Manager, or libsecret on Linux), the same mechanism apps like 1Password and browsers use, and it's tied to your OS login. FTPilot never writes a password to `config.json`, a log, or anywhere else on disk.
+- The App Lock password (see above): also SecretStorage, but as a salted scrypt hash rather than the password itself.
 
 ## Safety
 

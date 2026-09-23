@@ -27,6 +27,45 @@ Credentials are stored in VS Code's encrypted SecretStorage, never written to di
 - `FTPilot: Force Full Re-upload` — ignore the manifest, re-upload everything for every target
 - `FTPilot: Set FTP Credentials` — set/update credentials for the default account or a per-target override account
 - `FTPilot: Edit Config File` — open `.ftbdeploy/config.json`
+- `FTPilot: Set Up AI Agent Deploy Skill (Claude Code, Copilot, …)` — see below
+- `FTPilot: Scan Server Folder Structure` — see below
+
+## AI agent setup (Claude Code, Copilot, …)
+
+Run **FTPilot: Set Up AI Agent Deploy Skill** from the Command Palette (or the
+banner in the FTPilot panel when it isn't set up yet). It writes two files
+into your project, generated from the same source so they can't drift apart:
+
+- `.claude/skills/ftpilot-target-setup/SKILL.md` — a Claude Code skill.
+- `.ftbdeploy/AGENTS.md` — the same instructions in plain Markdown, for any
+  other coding agent (Copilot, Cursor, Antigravity, …). If your project
+  already has a root `AGENTS.md` and/or `CLAUDE.md`, a short pointer block is
+  added there too (existing content is left untouched).
+
+Once set up, telling your agent "this is ready to deploy" makes it fill in a
+target's **Target Name**, **Working Directory** and **Build Command** in
+`.ftbdeploy/config.json` by inspecting the project (package manager, build
+script, framework output folder). It never touches `remoteDir`, `host`,
+`port`, or FTP credentials — those stay your job, via the FTPilot panel or
+`FTPilot: Set FTP Credentials`.
+
+Both files are meant to be committed, so every contributor's coding agent —
+and anyone who clones the repo later — gets the same behavior. Re-running the
+command updates them to the latest version (it asks before overwriting local
+edits).
+
+### Filling in `remoteDir` too
+
+`FTPilot: Scan Server Folder Structure` (Command Palette, or the list-tree
+icon next to Connection in the panel) connects with your already-saved FTP
+credentials and writes the server's **directory names only** — never file
+contents, never the credentials themselves — to `.ftbdeploy/remote-tree.json`
+(gitignored, since it reflects a live server at scan time).
+
+The agent skill above reads that file if present and proposes `remoteDir` for
+any target it can match unambiguously to a scanned folder, asking you to pick
+when a match is ambiguous or missing. It never guesses a remote path without
+that evidence. `host`/`port`/credentials are still entirely your job.
 
 ## Config reference (`.ftbdeploy/config.json`)
 

@@ -4,6 +4,7 @@ import * as path from "path";
 import { ZipArchive } from "archiver";
 import { loadConfig, configDir } from "./config";
 import { getCredentials } from "./secrets";
+import { ensureAuthorized } from "./auth";
 import * as ftpClient from "./ftpClient";
 
 export interface BackupResult {
@@ -22,6 +23,9 @@ export async function runBackup(
     return { ok: false, message: "No folder open." };
   }
   const workspaceRoot = folders[0].uri.fsPath;
+  if (!(await ensureAuthorized(context, "Back up the FTPilot server"))) {
+    return { ok: false, message: "Authentication required." };
+  }
 
   let config;
   try {

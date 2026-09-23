@@ -3,6 +3,7 @@ import * as fs from "fs";
 import * as path from "path";
 import { loadConfig, manifestPath, updateTargetLocalDir, DeployTarget, DeployConfig, DEFAULT_MAX_CONNECTIONS, DEFAULT_EXCLUDE } from "./config";
 import { getCredentials } from "./secrets";
+import { ensureAuthorized } from "./auth";
 import { getCurrentBranch, checkoutBranch, getShortCommit } from "./git";
 import { runBuild, validateEnvSecrets, BuildError, LogSink } from "./build";
 import { loadManifest, saveManifest, hashFiles, diffTarget, walkDir, globMatcher, Manifest } from "./manifest";
@@ -194,6 +195,9 @@ export async function runDeploy(
   if (running) {
     void vscode.window.showWarningMessage("FTPilot: a deploy is already running.");
     return { ok: false, message: "Already running." };
+  }
+  if (!(await ensureAuthorized(context, options.dryRun ? "Preview an FTPilot deploy" : "Deploy with FTPilot"))) {
+    return { ok: false, message: "Authentication required." };
   }
   running = true;
   cancelRequested = false;
@@ -726,6 +730,9 @@ export async function runRollback(
   if (running) {
     void vscode.window.showWarningMessage("FTPilot: a deploy is already running.");
     return { ok: false, message: "Already running." };
+  }
+  if (!(await ensureAuthorized(context, "Roll back an FTPilot deploy"))) {
+    return { ok: false, message: "Authentication required." };
   }
   const info = loadSnapshot(workspaceRoot, options.snapshotId);
   const problem = !info ? "That rollback copy no longer exists (only the last 3 are kept)."
