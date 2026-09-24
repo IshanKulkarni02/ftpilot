@@ -2,14 +2,6 @@
 
 <img src="media/logo-full.png" alt="FTPilot" width="360" />
 
-[![VS Marketplace](https://img.shields.io/visual-studio-marketplace/v/IshanKulkarni.ftpilot?label=VS%20Marketplace&logo=visualstudiocode&color=007ACC)](https://marketplace.visualstudio.com/items?itemName=IshanKulkarni.ftpilot) [![Installs](https://img.shields.io/visual-studio-marketplace/i/IshanKulkarni.ftpilot?color=007ACC)](https://marketplace.visualstudio.com/items?itemName=IshanKulkarni.ftpilot) [![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
-
-### 👉 [Install FTPilot from the VS Code Marketplace](https://marketplace.visualstudio.com/items?itemName=IshanKulkarni.ftpilot)
-
-Or in VS Code: `Ctrl/Cmd+P` → `ext install IshanKulkarni.ftpilot`
-
----
-
 VS Code extension: build your project and FTP-deploy it to a cPanel server (or multiple domains/subdomains) with one click, from a dedicated `deploy` git branch.
 
 ## What it does
@@ -128,7 +120,7 @@ Bug reports, feature requests, and PRs are welcome — see [CONTRIBUTING.md](CON
 
 ## Status
 
-Published on the [VS Code Marketplace](https://marketplace.visualstudio.com/items?itemName=IshanKulkarni.ftpilot). Built for a MERN + TypeScript project deployed to Apache/cPanel over plain FTP. To run from source, press F5 in VS Code, or `npm run package` and "Install from VSIX".
+Early scaffold — built for a MERN + TypeScript project deployed to Apache/cPanel over plain FTP. Not yet published to the Marketplace; install locally via `npm run package` (produces a `.vsix`) then "Install from VSIX" in VS Code, or just run it via F5 during development.
 
 ## License
 
